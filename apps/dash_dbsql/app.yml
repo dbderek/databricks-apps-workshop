@@ -1,5 +1,5 @@
 command: [
-  "streamlit", "run", "app.py"
+  "python", "app.py"
 ]
 env:
   - name: SQL_WAREHOUSE_ID

@@ -1,0 +1,30 @@
+resources:
+  apps:
+    streamlit_lakebase:
+      name: "streamlit_lakebase"
+      source_code_path: ../../apps/streamlit_lakebase
+      description: "A Streamlit app for exploring the Lakebase demo dataset"
+
+      # The resources which this app should have access to
+      resources:
+        - name: "sql-warehouse"
+          sql_warehouse: # resource key
+            id: ${var.dbsql_serverless_warehouse_id}
+            permission: "CAN_USE"
+
+    dash_dbsql:
+      name: "dash_dbsql"
+      source_code_path: ../../apps/dash_dbsql
+      description: "A Dash app for exploring Databricks SQL"
+
+      # The resources which this app should have access to
+      resources:
+        - name: "sql-warehouse"
+          sql_warehouse: # resource key
+            id: ${var.dbsql_serverless_warehouse_id}
+            permission: "CAN_USE"
+
+    mcp:
+      name: "mcp_custom_app"
+      source_code_path: ../../apps/mcp
+      description: "An app serving a custom MCP server"
