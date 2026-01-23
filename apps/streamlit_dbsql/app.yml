@@ -1,0 +1,10 @@
+command: [
+  "streamlit", "run", "app.py"
+]
+env:
+  - name: SQL_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DATABRICKS_CATALOG
+    value: main
+  - name: DATABRICKS_SCHEMA
+    value: default
