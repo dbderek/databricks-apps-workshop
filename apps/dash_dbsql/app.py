@@ -61,7 +61,7 @@ def ensure_table(conn, catalog, schema):
           id BIGINT GENERATED ALWAYS AS IDENTITY,
           note STRING,
           created_at TIMESTAMP DEFAULT current_timestamp()
-        )
+        ) TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported')
     """)
     return table_name
 
@@ -79,43 +79,63 @@ def list_notes(conn, table_name, limit: int = 20):
 def insert_note(conn, table_name, note: str):
     exec_sql(conn, f"INSERT INTO {table_name} (note) VALUES (%(note)s)", {"note": note})
 
+# Design Constants
+COLORS = {
+    'primary': '#FF3621', 'bg': '#F5F7FA', 'card': '#FFFFFF', 
+    'text': '#1B3139', 'border': '#E0E0E0'
+}
+CARD_STYLE = {
+    'backgroundColor': COLORS['card'], 'padding': '24px', 'borderRadius': '8px',
+    'boxShadow': '0 2px 8px rgba(0,0,0,0.08)', 'marginBottom': '24px',
+    'border': f"1px solid {COLORS['border']}"
+}
+BTN_STYLE = {
+    'backgroundColor': COLORS['primary'], 'color': 'white', 'border': 'none',
+    'padding': '10px 24px', 'borderRadius': '4px', 'cursor': 'pointer', 'fontWeight': '500'
+}
+INPUT_STYLE = {
+    'width': '100%', 'padding': '8px 12px', 'borderRadius': '4px',
+    'border': f"1px solid {COLORS['border']}", 'height': '40px'
+}
+
 # 4) Layout
-app.layout = html.Div(style={'fontFamily': 'sans-serif', 'maxWidth': '800px', 'margin': '0 auto', 'padding': '20px'}, children=[
-    html.H1("Databricks SQL + Dash"),
-    
-    html.Div(style={'backgroundColor': '#f0f0f0', 'padding': '15px', 'borderRadius': '5px', 'marginBottom': '20px'}, children=[
-        html.H3("Connection Settings"),
-        html.Div([
-            html.Label("SQL Warehouse ID:"),
-            dcc.Input(id='warehouse-id', type='text', value=DEFAULT_WAREHOUSE_ID, style={'width': '100%', 'marginBottom': '10px'}),
+app.layout = html.Div(style={'fontFamily': '-apple-system, system-ui, sans-serif', 'backgroundColor': COLORS['bg'], 'minHeight': '100vh', 'padding': '40px', 'color': COLORS['text']}, children=[
+    html.Div(style={'maxWidth': '1000px', 'margin': '0 auto'}, children=[
+        html.H1("Databricks SQL + Dash", style={'marginBottom': '32px', 'fontWeight': '700'}),
+        
+        # Connection Settings
+        html.Div(style=CARD_STYLE, children=[
+            html.H3("Connection Settings", style={'marginTop': '0', 'marginBottom': '20px'}),
+            html.Div(style={'display': 'grid', 'gridTemplateColumns': 'repeat(auto-fit, minmax(200px, 1fr))', 'gap': '20px', 'marginBottom': '20px'}, children=[
+                html.Div([html.Label("SQL Warehouse ID", style={'fontWeight': '500', 'marginBottom': '8px', 'display': 'block'}), 
+                          dcc.Input(id='warehouse-id', value=DEFAULT_WAREHOUSE_ID, style=INPUT_STYLE)]),
+                html.Div([html.Label("Catalog", style={'fontWeight': '500', 'marginBottom': '8px', 'display': 'block'}), 
+                          dcc.Input(id='catalog', value=DEFAULT_CATALOG, style=INPUT_STYLE)]),
+                html.Div([html.Label("Schema", style={'fontWeight': '500', 'marginBottom': '8px', 'display': 'block'}), 
+                          dcc.Input(id='schema', value=DEFAULT_SCHEMA, style=INPUT_STYLE)]),
+            ]),
+            html.Button('Test Connection & Initialize', id='btn-connect', n_clicks=0, style=BTN_STYLE),
+            html.Div(id='connection-status', style={'marginTop': '16px', 'fontSize': '14px', 'fontWeight': '500'})
         ]),
-        html.Div([
-            html.Label("Catalog:"),
-            dcc.Input(id='catalog', type='text', value=DEFAULT_CATALOG, style={'width': '100%', 'marginBottom': '10px'}),
-        ]),
-        html.Div([
-            html.Label("Schema:"),
-            dcc.Input(id='schema', type='text', value=DEFAULT_SCHEMA, style={'width': '100%', 'marginBottom': '10px'}),
-        ]),
-        html.Button('Test Connection & Initialize', id='btn-connect', n_clicks=0),
-        html.Div(id='connection-status', style={'marginTop': '10px'})
-    ]),
 
-    html.Div(style={'borderTop': '2px solid #eee', 'paddingTop': '20px', 'marginBottom': '20px'}, children=[
-        html.H3("Add Note"),
-        html.Div([
-            dcc.Input(id='note-input', type='text', placeholder='Hello, DBSQL 👋', style={'width': '70%', 'padding': '8px', 'marginRight': '10px'}),
-            html.Button('Save Note', id='btn-save', n_clicks=0, style={'padding': '8px 15px'}),
-        ], style={'display': 'flex', 'alignItems': 'center'}),
-        html.Div(id='save-status', style={'marginTop': '10px', 'fontWeight': 'bold'})
-    ]),
+        # Add Note
+        html.Div(style=CARD_STYLE, children=[
+            html.H3("Add Note", style={'marginTop': '0', 'marginBottom': '20px'}),
+            html.Div(style={'display': 'flex', 'gap': '16px'}, children=[
+                dcc.Input(id='note-input', placeholder='Hello, DBSQL 👋', style={**INPUT_STYLE, 'flex': '1'}),
+                html.Button('Save Note', id='btn-save', n_clicks=0, style=BTN_STYLE),
+            ]),
+            html.Div(id='save-status', style={'marginTop': '16px', 'fontWeight': '500'})
+        ]),
 
-    html.Div([
-        html.Div([
-            html.H3("Recent Notes", style={'display': 'inline-block', 'marginRight': '20px'}),
-            html.Button('Refresh', id='btn-refresh', n_clicks=0),
-        ], style={'marginBottom': '15px'}),
-        html.Div(id='notes-table-container')
+        # Recent Notes
+        html.Div(style=CARD_STYLE, children=[
+            html.Div(style={'display': 'flex', 'justifyContent': 'space-between', 'alignItems': 'center', 'marginBottom': '20px'}, children=[
+                html.H3("Recent Notes", style={'margin': '0'}),
+                html.Button('Refresh', id='btn-refresh', n_clicks=0, style={'background': 'none', 'border': 'none', 'color': COLORS['primary'], 'cursor': 'pointer', 'fontWeight': '500', 'fontSize': '14px'}),
+            ]),
+            html.Div(id='notes-table-container')
+        ])
     ])
 ])
 
@@ -195,16 +215,19 @@ def update_table(n_clicks, warehouse_id, catalog, schema):
         return dash_table.DataTable(
             data=df.to_dict('records'),
             columns=[{'name': i, 'id': i} for i in df.columns],
-            style_table={'overflowX': 'auto'},
+            style_table={'overflowX': 'auto', 'borderRadius': '4px', 'border': f"1px solid {COLORS['border']}"},
+            style_as_list_view=True,
             style_cell={
-                'textAlign': 'left',
-                'padding': '10px',
-                'fontFamily': 'sans-serif'
+                'textAlign': 'left', 'padding': '12px 16px', 'fontFamily': 'inherit',
+                'borderBottom': f"1px solid {COLORS['border']}", 'color': COLORS['text']
             },
             style_header={
-                'backgroundColor': 'rgb(230, 230, 230)',
-                'fontWeight': 'bold'
-            }
+                'backgroundColor': '#F5F7FA', 'fontWeight': '600', 'borderBottom': f"2px solid {COLORS['border']}",
+                'color': COLORS['text']
+            },
+            style_data_conditional=[
+                {'if': {'row_index': 'odd'}, 'backgroundColor': '#FAFAFA'}
+            ]
         )
         
     except Exception as e:
