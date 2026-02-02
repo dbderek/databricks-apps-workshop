@@ -2,6 +2,7 @@ import os
 import streamlit as st
 import pandas as pd
 import tempfile
+from databricks.sdk.core import Config
 from pdf_processor import convert_pdf_to_base64, process_images_adaptive
 
 # Page config
@@ -11,11 +12,21 @@ st.set_page_config(
     layout="wide"
 )
 
-# Get Databricks configuration from environment
-DATABRICKS_HOST = os.getenv("DATABRICKS_HOST", "")
-if not DATABRICKS_HOST.endswith('/') and DATABRICKS_HOST:
+# Initialize Databricks configuration
+@st.cache_resource
+def get_databricks_config():
+    return Config()
+
+cfg = get_databricks_config()
+
+# Get Databricks configuration
+DATABRICKS_HOST = cfg.host
+if not DATABRICKS_HOST.endswith('/'):
     DATABRICKS_HOST += '/'
-DATABRICKS_BASE_URL = DATABRICKS_HOST + 'serving-endpoints/' if DATABRICKS_HOST else None
+DATABRICKS_BASE_URL = DATABRICKS_HOST + 'serving-endpoints/'
+
+# Get authentication token
+DATABRICKS_TOKEN = cfg.token
 
 # Get model endpoint from environment
 SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT")
@@ -177,6 +188,7 @@ if uploaded_file is not None:
                 results_series, stats = process_images_adaptive(
                     prompt=extraction_prompt,
                     images=df['base64_img'],
+                    databricks_token=DATABRICKS_TOKEN,
                     databricks_url=DATABRICKS_BASE_URL,
                     model=SERVING_ENDPOINT,
                     initial_workers=initial_workers,
