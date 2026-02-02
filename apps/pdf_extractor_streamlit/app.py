@@ -29,10 +29,10 @@ DATABRICKS_BASE_URL = DATABRICKS_HOST + 'serving-endpoints/'
 DATABRICKS_TOKEN = cfg.token
 
 # Get model endpoint from environment
-SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT")
+SERVING_ENDPOINT = os.getenv("DATABRICKS_SERVING_ENDPOINT")
 
 if not SERVING_ENDPOINT:
-    st.error("SERVING_ENDPOINT environment variable is not set. Please configure it in your Databricks App settings.")
+    st.error("DATABRICKS_SERVING_ENDPOINT environment variable is not set. Please configure it in your Databricks App settings.")
     st.stop()
 
 # Initialize session state
@@ -76,7 +76,7 @@ with st.sidebar:
         "Model Endpoint",
         value=SERVING_ENDPOINT,
         disabled=True,
-        help="Configured via SERVING_ENDPOINT environment variable"
+        help="Configured via DATABRICKS_SERVING_ENDPOINT environment variable"
     )
     
     st.divider()

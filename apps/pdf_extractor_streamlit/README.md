@@ -32,12 +32,12 @@ This separation keeps the code clean and maintainable.
 
 ## Configuration
 
-The model endpoint is configured via the `SERVING_ENDPOINT` environment variable set at the Databricks App level (not in app.yml).
+The model endpoint is configured via the `DATABRICKS_SERVING_ENDPOINT` environment variable set at the Databricks App level.
 
 ### Environment Variables
 
 Set these in your Databricks App configuration:
-- `SERVING_ENDPOINT`: Your Databricks Vision AI serving endpoint name (required)
+- `DATABRICKS_SERVING_ENDPOINT`: Your Databricks Vision AI serving endpoint name (required)
 
 ### Sidebar Settings
 
@@ -69,7 +69,7 @@ streamlit run app.py
 ## Deploying to Databricks Apps
 
 1. Ensure you have access to a Vision AI serving endpoint
-2. Update the `SERVING_ENDPOINT` environment variable in `app.yml` if needed
+2. Set the `DATABRICKS_SERVING_ENDPOINT` environment variable in your Databricks App settings
 3. Deploy using Databricks Apps
 4. The app will automatically authenticate using the app service principal
 
