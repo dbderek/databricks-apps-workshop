@@ -104,11 +104,11 @@ def convert_pdf_to_base64(pdf_path, dpi=300, progress_callback=None):
     return pd.DataFrame(df_data)
 
 
-def process_single_image(prompt, image_data, image_index, databricks_token, 
-                        databricks_url, model, rate_tracker):
+def process_single_image(prompt, image_data, image_index, databricks_url, model, rate_tracker):
     """Process a single image with adaptive rate limiting."""
     
-    client = OpenAI(api_key=databricks_token, base_url=databricks_url)
+    # OpenAI client will use app's credentials automatically in Databricks Apps
+    client = OpenAI(base_url=databricks_url)
     
     if pd.isna(image_data) or image_data == "":
         return (image_index, "ERROR: Empty image")
@@ -152,7 +152,7 @@ def process_single_image(prompt, image_data, image_index, databricks_token,
     return (image_index, "ERROR: Max retries exceeded")
 
 
-def process_images_adaptive(prompt, images, databricks_token, databricks_url,
+def process_images_adaptive(prompt, images, databricks_url,
                            model="databricks-llama-4-maverick",
                            initial_workers=5, min_workers=1, max_workers=10,
                            progress_callback=None):
@@ -162,7 +162,6 @@ def process_images_adaptive(prompt, images, databricks_token, databricks_url,
     Args:
         prompt: Text prompt for the model
         images: pandas Series of base64 encoded image strings
-        databricks_token: Token for Databricks API
         databricks_url: Base URL for Databricks API
         model: Model name to use
         initial_workers: Starting number of concurrent workers
@@ -198,7 +197,7 @@ def process_images_adaptive(prompt, images, databricks_token, databricks_url,
             futures = {
                 executor.submit(
                     process_single_image, prompt, img_data, idx,
-                    databricks_token, databricks_url, model, rate_tracker
+                    databricks_url, model, rate_tracker
                 ): idx
                 for idx, img_data in current_batch
             }
