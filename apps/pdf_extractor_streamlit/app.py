@@ -32,7 +32,7 @@ except Exception as e:
     DATABRICKS_BASE_URL = None
 
 # Get model endpoint from environment
-SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT")
+SERVING_ENDPOINT = os.getenv("DATABRICKS_SERVING_ENDPOINT")
 
 if not SERVING_ENDPOINT:
     st.error("SERVING_ENDPOINT environment variable is not set. Please configure it in your Databricks App settings.")
