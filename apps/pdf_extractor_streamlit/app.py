@@ -2,6 +2,7 @@ import os
 import streamlit as st
 import pandas as pd
 import tempfile
+import base64
 from databricks.sdk.core import Config
 from pdf_processor import convert_pdf_to_base64, process_images_adaptive
 
@@ -28,10 +29,8 @@ DATABRICKS_BASE_URL = DATABRICKS_HOST + 'serving-endpoints/'
 # Get authentication - try different methods
 DATABRICKS_TOKEN = None
 try:
-    # Try to get token from Config
     auth_result = cfg.authenticate()
     if isinstance(auth_result, dict) and 'Authorization' in auth_result:
-        # Extract token from Authorization header (format: "Bearer <token>")
         DATABRICKS_TOKEN = auth_result['Authorization'].replace('Bearer ', '')
     elif hasattr(cfg, 'token') and cfg.token:
         DATABRICKS_TOKEN = cfg.token
@@ -54,110 +53,98 @@ if "processing_complete" not in st.session_state:
     st.session_state.processing_complete = False
 if "results_df" not in st.session_state:
     st.session_state.results_df = None
-if "stats" not in st.session_state:
-    st.session_state.stats = None
+if "uploaded_file_name" not in st.session_state:
+    st.session_state.uploaded_file_name = None
 
-# Custom CSS for cleaner UI
+# Custom CSS for better styling and dark mode support
 st.markdown("""
     <style>
-    .main > div {
-        padding-top: 2rem;
+    /* Main container */
+    .main {
+        padding: 2rem;
     }
-    .stMetric {
-        background-color: #f0f2f6;
-        padding: 1rem;
-        border-radius: 0.5rem;
+    
+    /* Headers */
+    h1 {
+        margin-bottom: 0.5rem !important;
     }
-    .success-box {
-        padding: 1rem;
-        background-color: #d4edda;
-        border: 1px solid #c3e6cb;
-        border-radius: 0.5rem;
-        color: #155724;
+    
+    /* File uploader */
+    .stFileUploader {
+        border: 2px dashed #666;
+        border-radius: 10px;
+        padding: 2rem;
+        background-color: rgba(128, 128, 128, 0.1);
+    }
+    
+    /* Text areas */
+    .stTextArea textarea {
+        font-family: 'Monaco', 'Courier New', monospace;
+    }
+    
+    /* Buttons */
+    .stButton button {
+        width: 100%;
+        padding: 0.75rem;
+        font-size: 1rem;
+        font-weight: 600;
+    }
+    
+    /* Expanders */
+    .streamlit-expanderHeader {
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+    
+    /* Download buttons section */
+    .download-section {
+        background-color: rgba(128, 128, 128, 0.1);
+        padding: 1.5rem;
+        border-radius: 10px;
+        margin: 1rem 0;
     }
     </style>
     """, unsafe_allow_html=True)
 
 # Header
 st.title("PDF Text Extractor")
-st.caption("Extract text from PDFs using Databricks Vision AI")
+st.caption(f"Extract text from PDFs using Databricks Vision AI • Model: {SERVING_ENDPOINT}")
+st.markdown("---")
 
-# Sidebar configuration
-with st.sidebar:
-    st.header("Configuration")
-    
-    st.text_input(
-        "Model Endpoint",
-        value=SERVING_ENDPOINT,
-        disabled=True,
-        help="Configured via DATABRICKS_SERVING_ENDPOINT environment variable"
-    )
-    
-    st.divider()
-    
-    st.subheader("Processing Settings")
-    
-    dpi = st.slider(
-        "Image Resolution (DPI)",
-        min_value=150,
-        max_value=600,
-        value=300,
-        step=50,
-        help="Higher DPI = better quality but slower processing"
-    )
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        initial_workers = st.number_input("Initial", min_value=1, max_value=20, value=5, help="Starting workers")
-    with col2:
-        min_workers = st.number_input("Min", min_value=1, max_value=10, value=1, help="Minimum workers")
-    with col3:
-        max_workers = st.number_input("Max", min_value=5, max_value=50, value=10, help="Maximum workers")
-    
-    st.divider()
-    
-    st.subheader("Extraction Prompt")
-    extraction_prompt = st.text_area(
-        "Custom Prompt",
-        value="Transcribe the following form into markdown. Please bold all keys in key value pairs, and output sections with section headers.",
-        height=150,
-        help="Customize how the model extracts text from your PDF"
-    )
-    
-    st.divider()
-    
-    st.subheader("Output Options")
-    
-    output_table = st.text_input(
-        "Delta Table Path (optional)",
-        placeholder="catalog.schema.table_name",
-        help="Leave empty to skip saving to Delta table"
-    )
-
-# Main content
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    uploaded_file = st.file_uploader(
-        "Upload PDF",
-        type=['pdf'],
-        help="Select a PDF file to extract text from"
-    )
-
-with col2:
-    st.markdown("### Configuration Summary")
-    st.markdown(f"**Model:** `{SERVING_ENDPOINT}`")
-    st.markdown(f"**Resolution:** {dpi} DPI")
-    st.markdown(f"**Workers:** {initial_workers} - {max_workers}")
+# Step 1: Upload and Configuration
+uploaded_file = st.file_uploader(
+    "Upload PDF Document",
+    type=['pdf'],
+    help="Select a PDF file to extract text from"
+)
 
 if uploaded_file is not None:
-    st.success(f"Loaded: {uploaded_file.name}")
+    # Configuration options
+    col1, col2 = st.columns(2)
     
-    # Process button
-    if st.button("Extract Text", type="primary", use_container_width=True):
-        # Reset state
+    with col1:
+        extraction_prompt = st.text_area(
+            "Extraction Prompt",
+            value="Transcribe the following document into markdown. Please bold all keys in key value pairs, and output sections with section headers.",
+            height=120,
+            help="Customize how the AI extracts and formats text"
+        )
+    
+    with col2:
+        output_table = st.text_input(
+            "Delta Table Path (optional)",
+            placeholder="catalog.schema.table_name",
+            help="Leave empty to skip saving to Delta table"
+        )
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        process_button = st.button("Extract Text", type="primary", use_container_width=True)
+    
+    # Process the PDF
+    if process_button:
         st.session_state.processing_complete = False
         st.session_state.results_df = None
+        st.session_state.uploaded_file_name = uploaded_file.name
         
         # Save uploaded file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
@@ -165,67 +152,56 @@ if uploaded_file is not None:
             tmp_path = tmp_file.name
         
         try:
-            # Step 1: Convert PDF to images
             st.markdown("---")
-            st.subheader("Processing Status")
             
-            progress_container = st.container()
-            with progress_container:
-                status_text = st.empty()
-                progress_bar = st.progress(0)
-                stats_cols = st.columns(4)
-                
-                def update_progress(current, total, message, stats=None):
-                    progress = current / total if total > 0 else 0
-                    progress_bar.progress(progress)
-                    status_text.text(f"{message} ({current}/{total})")
+            # Processing status
+            status_container = st.container()
+            with status_container:
+                with st.spinner("Processing your document..."):
+                    # Step 1: Convert PDF to images
+                    status_text = st.empty()
+                    progress_bar = st.progress(0)
                     
-                    if stats:
-                        with stats_cols[0]:
-                            st.metric("Workers", stats.get('workers', '-'))
-                        with stats_cols[1]:
-                            st.metric("Rate Limits", stats.get('rate_limits', '-'))
-                        with stats_cols[2]:
-                            status = "Success" if stats.get('success') else "Failed"
-                            st.metric("Last Page", status)
-                        with stats_cols[3]:
-                            st.metric("Progress", f"{int(progress * 100)}%")
-                
-                status_text.text("Converting PDF to images...")
-                df = convert_pdf_to_base64(tmp_path, dpi=dpi, progress_callback=update_progress)
-                
-                st.success(f"Converted {len(df)} pages to images")
-                
-                # Step 2: Extract text from images
-                status_text.text("Extracting text with AI model...")
-                
-                results_series, stats = process_images_adaptive(
-                    prompt=extraction_prompt,
-                    images=df['base64_img'],
-                    databricks_token=DATABRICKS_TOKEN,
-                    databricks_url=DATABRICKS_BASE_URL,
-                    model=SERVING_ENDPOINT,
-                    initial_workers=initial_workers,
-                    min_workers=min_workers,
-                    max_workers=max_workers,
-                    progress_callback=update_progress
-                )
-                
-                df['transcription'] = results_series
-                
-                # Store results
-                st.session_state.results_df = df
-                st.session_state.stats = stats
-                st.session_state.processing_complete = True
-                
-                progress_bar.progress(1.0)
-                st.success("Text extraction complete!")
+                    status_text.info("Converting PDF pages to images...")
+                    df = convert_pdf_to_base64(tmp_path, dpi=300)
+                    progress_bar.progress(0.3)
+                    
+                    status_text.info(f"Extracting text from {len(df)} pages using AI...")
+                    
+                    # Step 2: Extract text from images (with smart worker configuration)
+                    # Auto-configure workers based on document size
+                    num_pages = len(df)
+                    if num_pages <= 5:
+                        initial_workers, min_workers, max_workers = 3, 1, 5
+                    elif num_pages <= 20:
+                        initial_workers, min_workers, max_workers = 5, 2, 10
+                    else:
+                        initial_workers, min_workers, max_workers = 8, 3, 15
+                    
+                    results_series, stats = process_images_adaptive(
+                        prompt=extraction_prompt,
+                        images=df['base64_img'],
+                        databricks_token=DATABRICKS_TOKEN,
+                        databricks_url=DATABRICKS_BASE_URL,
+                        model=SERVING_ENDPOINT,
+                        initial_workers=initial_workers,
+                        min_workers=min_workers,
+                        max_workers=max_workers
+                    )
+                    
+                    df['transcription'] = results_series
+                    progress_bar.progress(1.0)
+                    
+                    # Store results
+                    st.session_state.results_df = df
+                    st.session_state.processing_complete = True
+                    
+                    status_text.success(f"Successfully extracted text from {stats['success']}/{stats['total']} pages!")
         
         except Exception as e:
             st.error(f"Error processing PDF: {str(e)}")
         
         finally:
-            # Clean up temp file
             try:
                 os.unlink(tmp_path)
             except:
@@ -233,62 +209,94 @@ if uploaded_file is not None:
 
 # Display results
 if st.session_state.processing_complete and st.session_state.results_df is not None:
+    df = st.session_state.results_df
+    
     st.markdown("---")
-    st.subheader("Results Summary")
+    st.subheader("Extracted Content")
     
-    stats = st.session_state.stats
-    col1, col2, col3, col4 = st.columns(4)
+    # Create two columns for side-by-side view
+    col_left, col_right = st.columns([1, 1])
     
-    with col1:
-        st.metric("Total Pages", stats['total'])
-    with col2:
-        st.metric("Successful", stats['success'], delta=f"{stats['success_rate']:.1f}%")
-    with col3:
-        st.metric("Failed", stats['failed'])
-    with col4:
-        st.metric("Success Rate", f"{stats['success_rate']:.1f}%")
+    with col_left:
+        st.markdown("#### PDF Preview")
+        
+        # Page selector
+        page_num = st.selectbox(
+            "Select page to view:",
+            options=range(1, len(df) + 1),
+            format_func=lambda x: f"Page {x} of {len(df)}"
+        )
+        
+        # Display PDF page as image
+        selected_page = df[df['page_num'] == page_num].iloc[0]
+        img_data = base64.b64decode(selected_page['base64_img'])
+        st.image(img_data, use_container_width=True)
     
+    with col_right:
+        st.markdown("#### Extracted Text")
+        
+        # Add some spacing to align with the selector
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # Display extracted text
+        transcription = selected_page['transcription']
+        
+        if str(transcription).startswith("ERROR:"):
+            st.error(transcription)
+        else:
+            # Display in a scrollable container
+            st.markdown(
+                f"""
+                <div style="
+                    background-color: rgba(128, 128, 128, 0.1);
+                    padding: 1.5rem;
+                    border-radius: 10px;
+                    height: 600px;
+                    overflow-y: auto;
+                    font-family: 'Monaco', 'Courier New', monospace;
+                    font-size: 0.9rem;
+                ">
+                    {transcription}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+    
+    # Export Options at the bottom
     st.markdown("---")
     st.subheader("Export Options")
     
-    df = st.session_state.results_df
-    
-    # Export buttons
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        # Download CSV
-        csv = df.to_csv(index=False)
+        csv = df[['page_num', 'transcription', 'doc_id']].to_csv(index=False)
         st.download_button(
-            label="Download CSV",
+            label="Download as CSV",
             data=csv,
-            file_name="extracted_text.csv",
+            file_name=f"{st.session_state.uploaded_file_name}_extracted.csv",
             mime="text/csv",
             use_container_width=True
         )
     
     with col2:
-        # Copy to clipboard (just the transcriptions)
         transcriptions = "\n\n---PAGE BREAK---\n\n".join(
             df['transcription'].astype(str).tolist()
         )
         st.download_button(
-            label="Download Text",
+            label="Download as Text",
             data=transcriptions,
-            file_name="extracted_text.txt",
+            file_name=f"{st.session_state.uploaded_file_name}_extracted.txt",
             mime="text/plain",
             use_container_width=True
         )
     
     with col3:
-        # Save to Delta table
         if output_table and output_table.strip():
             if st.button("Save to Delta Table", use_container_width=True):
                 try:
                     from pyspark.sql import SparkSession
                     spark = SparkSession.builder.getOrCreate()
                     
-                    # Drop base64 column for storage efficiency
                     df_to_save = df.drop(columns=['base64_img'])
                     spark_df = spark.createDataFrame(df_to_save)
                     
@@ -300,67 +308,33 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
                     
                     st.success(f"Saved to {output_table}")
                 except Exception as e:
-                    st.error(f"Error saving to Delta: {str(e)}")
+                    st.error(f"Error: {str(e)}")
         else:
-            st.button("Save to Delta Table", disabled=True, use_container_width=True, help="Enter a table path in sidebar")
-    
-    st.markdown("---")
-    st.subheader("Extracted Text by Page")
-    
-    # Create tabs for each page
-    if len(df) > 0:
-        # Show page selector for easier navigation
-        page_num = st.selectbox(
-            "Jump to page:",
-            options=range(1, len(df) + 1),
-            format_func=lambda x: f"Page {x}"
-        )
-        
-        selected_page = df[df['page_num'] == page_num].iloc[0]
-        
-        with st.expander(f"Page {selected_page['page_num']}", expanded=True):
-            transcription = selected_page['transcription']
-            
-            if str(transcription).startswith("ERROR:"):
-                st.error(transcription)
-            else:
-                st.markdown(transcription)
-            
-            st.caption(f"Document ID: {selected_page['doc_id']}")
-    
-    # Show full dataframe (without base64 images)
-    with st.expander("View Full Data Table"):
-        display_df = df.drop(columns=['base64_img'])
-        st.dataframe(display_df, use_container_width=True, height=400)
+            st.button("Save to Delta Table", disabled=True, use_container_width=True, help="Enter table path above")
 
-else:
+elif uploaded_file is None:
     # Show instructions when no file is uploaded
-    if uploaded_file is None:
-        st.info("Upload a PDF file to get started")
+    st.info("Upload a PDF document to get started")
+    
+    with st.expander("How it works", expanded=True):
+        st.markdown("""
+        ### Simple 3-Step Process
         
-        with st.expander("How it works"):
-            st.markdown("""
-            ### PDF Text Extraction Process
-            
-            1. **Upload**: Select a PDF file
-            2. **Convert**: PDF pages are converted to high-resolution images
-            3. **Extract**: Databricks Vision AI model analyzes each page and extracts text
-            4. **Export**: Download results as CSV/text or save to a Delta table
-            
-            ### Tips for Best Results
-            
-            - Use **higher DPI** (400-600) for documents with small text
-            - Adjust **workers** based on your endpoint's throughput:
-              - Pay-Per-Token: 5-10 workers
-              - Provisioned (200 units): 30-40 workers
-            - Customize the **extraction prompt** for specific document types
-            - The system automatically handles rate limiting and retries
-            
-            ### Model Information
-            
-            This app uses a **Databricks Vision AI** model which can:
-            - Read and understand text in images
-            - Preserve document structure and formatting
-            - Handle forms, tables, and complex layouts
-            - Output structured markdown
-            """)
+        1. **Upload** - Select your PDF document
+        2. **Configure** - Optionally customize the extraction prompt
+        3. **Extract** - Click the button and watch the AI extract text
+        
+        ### Features
+        
+        - **Side-by-side view** - Compare original PDF with extracted text
+        - **Multiple export options** - Download as CSV, text file, or save to Delta
+        - **Smart processing** - Automatically adjusts to document size
+        - **Production ready** - Built on Databricks Vision AI with error handling
+        
+        ### Best For
+        
+        - Forms and structured documents
+        - Scanned documents and images
+        - Tables and financial reports
+        - Contracts and legal documents
+        """)
