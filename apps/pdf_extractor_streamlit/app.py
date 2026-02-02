@@ -230,7 +230,7 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
         # Display PDF page as image
         selected_page = df[df['page_num'] == page_num].iloc[0]
         img_data = base64.b64decode(selected_page['base64_img'])
-        st.image(img_data, use_container_width=True)
+        st.image(img_data, use_column_width=True)
     
     with col_right:
         st.markdown("#### Extracted Text")
