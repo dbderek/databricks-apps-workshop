@@ -25,8 +25,22 @@ if not DATABRICKS_HOST.endswith('/'):
     DATABRICKS_HOST += '/'
 DATABRICKS_BASE_URL = DATABRICKS_HOST + 'serving-endpoints/'
 
-# Get authentication token
-DATABRICKS_TOKEN = cfg.token
+# Get authentication - try different methods
+DATABRICKS_TOKEN = None
+try:
+    # Try to get token from Config
+    auth_result = cfg.authenticate()
+    if isinstance(auth_result, dict) and 'Authorization' in auth_result:
+        # Extract token from Authorization header (format: "Bearer <token>")
+        DATABRICKS_TOKEN = auth_result['Authorization'].replace('Bearer ', '')
+    elif hasattr(cfg, 'token') and cfg.token:
+        DATABRICKS_TOKEN = cfg.token
+except Exception as e:
+    st.error(f"Error getting authentication token: {e}")
+
+if not DATABRICKS_TOKEN:
+    st.error("Could not retrieve Databricks authentication token. Please check app permissions.")
+    st.stop()
 
 # Get model endpoint from environment
 SERVING_ENDPOINT = os.getenv("DATABRICKS_SERVING_ENDPOINT")
