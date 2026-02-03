@@ -19,7 +19,8 @@ PGPORT = os.environ.get("PGPORT", "5432")
 PGSSLMODE = os.environ.get("PGSSLMODE", "require")
 
 # Lakebase table configuration
-LAKEBASE_SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "app")
+# Using "public" schema which exists by default in PostgreSQL
+LAKEBASE_SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "public")
 LAKEBASE_TABLE = os.environ.get("LAKEBASE_TABLE", "support_tickets")
 
 # Validation
@@ -54,12 +55,11 @@ def get_engine() -> Engine:
 # Get current user for ticket assignment
 CURRENT_USER = PGUSER  # The PostgreSQL user (email) for this session
 
-# Initialize database (creates schema/table if they don't exist)
+# Initialize database (verifies table exists or creates it)
 def init_db(engine: Engine):
-    """Initialize the database schema and table."""
+    """Initialize the database table if it doesn't exist."""
+    # Create table if it doesn't exist (public schema already exists in PostgreSQL)
     ddl = f"""
-    CREATE SCHEMA IF NOT EXISTS {LAKEBASE_SCHEMA};
-    
     CREATE TABLE IF NOT EXISTS {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (
       id BIGSERIAL PRIMARY KEY,
       title VARCHAR(255) NOT NULL,
