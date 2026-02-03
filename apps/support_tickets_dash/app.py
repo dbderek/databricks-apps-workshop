@@ -51,7 +51,10 @@ def get_engine() -> Engine:
     
     return engine
 
-# Initialize database
+# Get current user for ticket assignment
+CURRENT_USER = PGUSER  # The PostgreSQL user (email) for this session
+
+# Initialize database (creates table if it doesn't exist)
 def init_db(engine: Engine):
     ddl = f"""
     CREATE SCHEMA IF NOT EXISTS {LAKEBASE_SCHEMA};
@@ -63,6 +66,7 @@ def init_db(engine: Engine):
       customer_email VARCHAR(255) NOT NULL,
       status VARCHAR(50) NOT NULL DEFAULT 'open',
       priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+      assigned_to VARCHAR(255) NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
     );
@@ -71,9 +75,13 @@ def init_db(engine: Engine):
         conn.execute(text(ddl))
 
 def get_tickets(engine: Engine, status_filter=None):
-    """Fetch tickets from database"""
+    """Fetch tickets from database.
+    
+    Note: Row-level security (RLS) is enabled on this table.
+    Users will only see tickets where assigned_to matches their username.
+    """
     sql = f"""
-    SELECT id, title, description, customer_email, status, priority, created_at, updated_at
+    SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
     FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
     """
     if status_filter and status_filter != "all":
@@ -86,17 +94,18 @@ def get_tickets(engine: Engine, status_filter=None):
         return pd.DataFrame(result) if result else pd.DataFrame()
 
 def create_ticket(engine: Engine, title, description, customer_email, priority):
-    """Create a new support ticket"""
+    """Create a new support ticket assigned to the current user."""
     sql = f"""
-    INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status)
-    VALUES (:title, :desc, :email, :priority, 'open')
+    INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
+    VALUES (:title, :desc, :email, :priority, 'open', :assigned_to)
     """
     with engine.begin() as conn:
         conn.execute(text(sql), {
             "title": title,
             "desc": description,
             "email": customer_email,
-            "priority": priority
+            "priority": priority,
+            "assigned_to": CURRENT_USER
         })
 
 def update_ticket_status(engine: Engine, ticket_id, new_status):
@@ -141,10 +150,10 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.H1("🎫 Support Ticket System", className="text-center mb-4 mt-4"),
-            html.P(
-                f"Powered by Databricks Lakebase • Table: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}",
-                className="text-center text-muted mb-4"
-            )
+            html.P([
+                f"Powered by Databricks Lakebase • Logged in as: ",
+                html.Strong(CURRENT_USER)
+            ], className="text-center text-muted mb-4")
         ])
     ]),
     
@@ -187,12 +196,12 @@ app.layout = dbc.Container([
             dbc.Card([
                 dbc.CardHeader([
                     dbc.Row([
-                        dbc.Col(html.H4("📋 All Tickets"), width=6),
+                        dbc.Col(html.H4("📋 My Tickets"), width=6),
                         dbc.Col([
                             dbc.Select(
                                 id="status-filter",
                                 options=[
-                                    {"label": "All Tickets", "value": "all"},
+                                    {"label": "All My Tickets", "value": "all"},
                                     {"label": "🔴 Open", "value": "open"},
                                     {"label": "🟡 In Progress", "value": "in_progress"},
                                     {"label": "🟢 Resolved", "value": "resolved"},
