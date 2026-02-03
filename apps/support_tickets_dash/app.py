@@ -98,13 +98,34 @@ def check_table_exists(engine: Engine) -> bool:
     """Check if the support tickets table exists."""
     sql = """
     SELECT EXISTS (
-        SELECT FROM information_schema.tables 
+        SELECT 1 FROM information_schema.tables 
         WHERE table_schema = :schema AND table_name = :table
     );
     """
     with engine.begin() as conn:
         result = conn.execute(text(sql), {"schema": LAKEBASE_SCHEMA, "table": LAKEBASE_TABLE}).scalar()
         return result
+
+def list_all_tables(engine: Engine):
+    """List all tables in the database for debugging."""
+    sql = """
+    SELECT table_schema, table_name 
+    FROM information_schema.tables 
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+    ORDER BY table_schema, table_name;
+    """
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(sql)).fetchall()
+            if result:
+                print("=== Tables in database ===")
+                for row in result:
+                    print(f"  {row[0]}.{row[1]}")
+                print("=" * 30)
+            else:
+                print("No user tables found in database!")
+    except Exception as e:
+        print(f"Error listing tables: {e}")
 
 TABLE_MISSING_WARNING = f"""
 ⚠️ Table '{LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}' does not exist!
@@ -175,6 +196,8 @@ try:
     else:
         print(f"WARNING: Table {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} does not exist!")
         print("Please run setup-lakebase.ipynb to create the table.")
+        print("\nListing all tables in the database for debugging:")
+        list_all_tables(engine)
 except Exception as e:
     import traceback
     init_error = str(e)
