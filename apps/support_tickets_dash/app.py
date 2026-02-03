@@ -93,26 +93,27 @@ def get_engine() -> Engine:
 # Get current user for ticket assignment
 CURRENT_USER = PGUSER  # The PostgreSQL user (email) for this session
 
-# Initialize database (verifies table exists or creates it)
-def init_db(engine: Engine):
-    """Initialize the database table if it doesn't exist."""
-    # Create table if it doesn't exist (public schema already exists in PostgreSQL)
-    ddl = f"""
-    CREATE TABLE IF NOT EXISTS {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (
-      id BIGSERIAL PRIMARY KEY,
-      title VARCHAR(255) NOT NULL,
-      description TEXT NOT NULL,
-      customer_email VARCHAR(255) NOT NULL,
-      status VARCHAR(50) NOT NULL DEFAULT 'open',
-      priority VARCHAR(20) NOT NULL DEFAULT 'medium',
-      assigned_to VARCHAR(255) NOT NULL,
-      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+# Check if table exists (don't create - setup notebook handles that)
+def check_table_exists(engine: Engine) -> bool:
+    """Check if the support tickets table exists."""
+    sql = """
+    SELECT EXISTS (
+        SELECT FROM information_schema.tables 
+        WHERE table_schema = :schema AND table_name = :table
     );
     """
     with engine.begin() as conn:
-        conn.execute(text(ddl))
-    print(f"Database initialized: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
+        result = conn.execute(text(sql), {"schema": LAKEBASE_SCHEMA, "table": LAKEBASE_TABLE}).scalar()
+        return result
+
+TABLE_MISSING_WARNING = f"""
+⚠️ Table '{LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}' does not exist!
+
+Please run the setup notebook before using this app:
+  apps/support_tickets_dash/setup-lakebase.ipynb
+
+This notebook will create the Lakebase instance, table, and seed data.
+"""
 
 def get_tickets(engine: Engine, status_filter=None):
     """Fetch tickets from database.
@@ -158,19 +159,27 @@ def update_ticket_status(engine: Engine, ticket_id, new_status):
     with engine.begin() as conn:
         conn.execute(text(sql), {"status": new_status, "id": ticket_id})
 
-# Initialize engine
+# Initialize engine and check table exists
+engine = None
+table_exists = False
+init_error = None
+
 try:
     if missing:
         raise ValueError(f"Cannot initialize database - missing env vars: {', '.join(missing)}")
     engine = get_engine()
-    print("Engine created successfully, initializing database...")
-    init_db(engine)
-    print("Database initialization complete!")
+    print("Engine created successfully, checking table exists...")
+    table_exists = check_table_exists(engine)
+    if table_exists:
+        print(f"Table verified: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
+    else:
+        print(f"WARNING: Table {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} does not exist!")
+        print("Please run setup-lakebase.ipynb to create the table.")
 except Exception as e:
     import traceback
+    init_error = str(e)
     print(f"Database initialization error: {e}")
     print(f"Traceback:\n{traceback.format_exc()}")
-    engine = None
 
 # Initialize Dash app
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
@@ -191,8 +200,39 @@ priority_colors = {
     "critical": "dark"
 }
 
+# Build warning alert if needed
+def get_warning_alert():
+    if init_error:
+        return dbc.Alert([
+            html.H4("⚠️ Database Connection Error", className="alert-heading"),
+            html.P(f"Error: {init_error}"),
+            html.Hr(),
+            html.P([
+                "Please ensure the database resource is configured correctly and run ",
+                html.Code("apps/support_tickets_dash/setup-lakebase.ipynb"),
+                " to create the Lakebase instance and table."
+            ], className="mb-0")
+        ], color="danger", className="mb-4")
+    elif not table_exists:
+        return dbc.Alert([
+            html.H4("⚠️ Table Not Found", className="alert-heading"),
+            html.P(f"The table '{LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}' does not exist."),
+            html.Hr(),
+            html.P([
+                "Please run ",
+                html.Code("apps/support_tickets_dash/setup-lakebase.ipynb"),
+                " in Databricks to create the Lakebase instance, table, and seed data before using this app."
+            ], className="mb-0")
+        ], color="warning", className="mb-4")
+    return None
+
+warning_alert = get_warning_alert()
+
 # Layout
 app.layout = dbc.Container([
+    # Warning banner (if any)
+    warning_alert if warning_alert else html.Div(),
+    
     dbc.Row([
         dbc.Col([
             html.H1("🎫 Support Ticket System", className="text-center mb-4 mt-4"),
@@ -308,6 +348,9 @@ app.layout = dbc.Container([
     prevent_initial_call=True
 )
 def create_new_ticket(n_clicks, title, description, email, priority):
+    if engine is None or not table_exists:
+        return dbc.Alert("Database not ready. Please run setup-lakebase.ipynb first.", color="danger"), title, description, email, priority
+    
     if not all([title, description, email]):
         return dbc.Alert("Please fill in all fields", color="warning"), title, description, email, priority
     
@@ -325,11 +368,26 @@ def create_new_ticket(n_clicks, title, description, email, priority):
     Input("update-ticket-btn", "n_clicks")
 )
 def update_tickets_display(n, status_filter, create_clicks, update_clicks):
+    # Check if database is ready
+    if engine is None:
+        return dbc.Alert([
+            html.Strong("Database not connected. "),
+            "Please check the logs and ensure the database resource is configured."
+        ], color="danger")
+    
+    if not table_exists:
+        return dbc.Alert([
+            html.Strong("Table not found. "),
+            html.Span("Please run "),
+            html.Code("setup-lakebase.ipynb"),
+            html.Span(" to initialize the database.")
+        ], color="warning")
+    
     try:
         df = get_tickets(engine, status_filter)
         
         if df.empty:
-            return dbc.Alert("No tickets found", color="info")
+            return dbc.Alert("No tickets found. Create your first ticket using the form on the left!", color="info")
         
         # Create ticket cards
         tickets = []
@@ -385,20 +443,27 @@ def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_
     if not callback_context.triggered:
         return False, None, "", None
     
+    if engine is None or not table_exists:
+        return False, None, "", None
+    
     trigger_id = callback_context.triggered[0]["prop_id"]
     
     # If update button clicked
     if "update-btn" in trigger_id:
-        ticket_id = eval(trigger_id.split(".")[0])["index"]
-        df = get_tickets(engine)
-        ticket = df[df['id'] == ticket_id].iloc[0]
-        
-        info = html.Div([
-            html.H5(f"Ticket #{ticket['id']}: {ticket['title']}"),
-            html.P(f"Current Status: {ticket['status'].replace('_', ' ').title()}")
-        ])
-        
-        return True, ticket_id, info, ticket['status']
+        try:
+            ticket_id = eval(trigger_id.split(".")[0])["index"]
+            df = get_tickets(engine)
+            ticket = df[df['id'] == ticket_id].iloc[0]
+            
+            info = html.Div([
+                html.H5(f"Ticket #{ticket['id']}: {ticket['title']}"),
+                html.P(f"Current Status: {ticket['status'].replace('_', ' ').title()}")
+            ])
+            
+            return True, ticket_id, info, ticket['status']
+        except Exception as e:
+            print(f"Error opening modal: {e}")
+            return False, None, "", None
     
     # If confirm update clicked
     if "update-ticket-btn" in trigger_id and selected_id:
