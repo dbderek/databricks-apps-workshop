@@ -111,6 +111,30 @@ st.title("PDF Text Extractor")
 st.caption(f"Extract text from PDFs using Databricks Vision AI • Model: {SERVING_ENDPOINT}")
 st.markdown("---")
 
+# How it works section (above upload)
+with st.expander("How it works", expanded=False):
+    st.markdown("""
+    ### Simple 3-Step Process
+    
+    1. **Upload** - Select your PDF document
+    2. **Configure** - Optionally customize the extraction prompt
+    3. **Extract** - Click the button and watch the AI extract text
+    
+    ### Features
+    
+    - **Side-by-side view** - Compare original PDF with extracted text
+    - **Multiple export options** - Download as CSV, text file, or save to Delta
+    - **Smart processing** - Automatically adjusts to document size
+    - **Production ready** - Built on Databricks Vision AI with error handling
+    
+    ### Best For
+    
+    - Forms and structured documents
+    - Scanned documents and images
+    - Tables and financial reports
+    - Contracts and legal documents
+    """)
+
 # Step 1: Upload and Configuration
 uploaded_file = st.file_uploader(
     "Upload PDF Document",
@@ -120,25 +144,14 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
     # Configuration options
-    col1, col2 = st.columns(2)
+    extraction_prompt = st.text_area(
+        "Extraction Prompt",
+        value="Transcribe the following document into markdown. Please bold all keys in key value pairs, and output sections with section headers.",
+        height=120,
+        help="Customize how the AI extracts and formats text"
+    )
     
-    with col1:
-        extraction_prompt = st.text_area(
-            "Extraction Prompt",
-            value="Transcribe the following document into markdown. Please bold all keys in key value pairs, and output sections with section headers.",
-            height=120,
-            help="Customize how the AI extracts and formats text"
-        )
-    
-    with col2:
-        output_table = st.text_input(
-            "Delta Table Path (optional)",
-            placeholder="catalog.schema.table_name",
-            help="Leave empty to skip saving to Delta table"
-        )
-        
-        st.markdown("<br>", unsafe_allow_html=True)
-        process_button = st.button("Extract Text", type="primary", use_container_width=True)
+    process_button = st.button("Extract Text", type="primary", use_container_width=True)
     
     # Process the PDF
     if process_button:
@@ -275,7 +288,8 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
             data=csv,
             file_name=f"{st.session_state.uploaded_file_name}_extracted.csv",
             mime="text/csv",
-            use_container_width=True
+            use_container_width=True,
+            key="download_csv"
         )
     
     with col2:
@@ -287,54 +301,92 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
             data=transcriptions,
             file_name=f"{st.session_state.uploaded_file_name}_extracted.txt",
             mime="text/plain",
-            use_container_width=True
+            use_container_width=True,
+            key="download_text"
         )
     
     with col3:
-        if output_table and output_table.strip():
-            if st.button("Save to Delta Table", use_container_width=True):
+        # Create a regular button that opens a modal
+        if st.button("Save to Delta Table", use_container_width=True, key="open_delta_modal"):
+            st.session_state.show_delta_modal = True
+    
+    # Delta table modal
+    if st.session_state.get("show_delta_modal", False):
+        with st.form("delta_table_form"):
+            st.subheader("Save to Delta Table")
+            
+            delta_table_path = st.text_input(
+                "Enter Delta Table Path",
+                placeholder="catalog.schema.table_name",
+                help="Full path to the Delta table"
+            )
+            
+            col_submit, col_cancel = st.columns(2)
+            
+            with col_submit:
+                submitted = st.form_submit_button("Save", use_container_width=True, type="primary")
+            
+            with col_cancel:
+                cancelled = st.form_submit_button("Cancel", use_container_width=True)
+            
+            if submitted and delta_table_path:
                 try:
-                    from pyspark.sql import SparkSession
-                    spark = SparkSession.builder.getOrCreate()
+                    # Use Databricks SQL connector instead of PySpark
+                    from databricks import sql
+                    from databricks.sdk.core import Config
                     
-                    df_to_save = df.drop(columns=['base64_img'])
-                    spark_df = spark.createDataFrame(df_to_save)
+                    cfg = Config()
                     
-                    spark_df.write \
-                        .format("delta") \
-                        .mode("overwrite") \
-                        .option("overwriteSchema", "true") \
-                        .saveAsTable(output_table)
+                    # Create connection using SQL warehouse
+                    # Note: This requires SQL_WAREHOUSE_ID to be set in environment
+                    warehouse_id = os.getenv("SQL_WAREHOUSE_ID")
                     
-                    st.success(f"Saved to {output_table}")
+                    if not warehouse_id:
+                        st.error("SQL_WAREHOUSE_ID environment variable is not set. Cannot save to Delta table.")
+                    else:
+                        conn = sql.connect(
+                            server_hostname=cfg.host,
+                            http_path=f"/sql/1.0/warehouses/{warehouse_id}",
+                            credentials_provider=lambda: cfg.authenticate
+                        )
+                        
+                        # Create table from DataFrame
+                        df_to_save = df[['page_num', 'transcription', 'doc_id']]
+                        
+                        # Create table if not exists
+                        create_sql = f"""
+                        CREATE TABLE IF NOT EXISTS {delta_table_path} (
+                            page_num BIGINT,
+                            transcription STRING,
+                            doc_id STRING
+                        ) USING DELTA
+                        """
+                        
+                        with conn.cursor() as cursor:
+                            cursor.execute(create_sql)
+                        
+                        # Insert data
+                        for _, row in df_to_save.iterrows():
+                            insert_sql = f"""
+                            INSERT INTO {delta_table_path} (page_num, transcription, doc_id)
+                            VALUES ({row['page_num']}, '{row['transcription'].replace("'", "''")}', '{row['doc_id']}')
+                            """
+                            with conn.cursor() as cursor:
+                                cursor.execute(insert_sql)
+                        
+                        conn.close()
+                        
+                        st.success(f"Successfully saved {len(df_to_save)} rows to {delta_table_path}")
+                        st.session_state.show_delta_modal = False
+                        st.rerun()
+                        
                 except Exception as e:
-                    st.error(f"Error: {str(e)}")
-        else:
-            st.button("Save to Delta Table", disabled=True, use_container_width=True, help="Enter table path above")
+                    st.error(f"Error saving to Delta: {str(e)}")
+            
+            if cancelled:
+                st.session_state.show_delta_modal = False
+                st.rerun()
 
 elif uploaded_file is None:
     # Show instructions when no file is uploaded
     st.info("Upload a PDF document to get started")
-    
-    with st.expander("How it works", expanded=True):
-        st.markdown("""
-        ### Simple 3-Step Process
-        
-        1. **Upload** - Select your PDF document
-        2. **Configure** - Optionally customize the extraction prompt
-        3. **Extract** - Click the button and watch the AI extract text
-        
-        ### Features
-        
-        - **Side-by-side view** - Compare original PDF with extracted text
-        - **Multiple export options** - Download as CSV, text file, or save to Delta
-        - **Smart processing** - Automatically adjusts to document size
-        - **Production ready** - Built on Databricks Vision AI with error handling
-        
-        ### Best For
-        
-        - Forms and structured documents
-        - Scanned documents and images
-        - Tables and financial reports
-        - Contracts and legal documents
-        """)

@@ -1,6 +1,6 @@
 streamlit>=1.32.0
 databricks-sdk>=0.23.0
+databricks-sql-connector>=3.0.0
 PyMuPDF>=1.23.0
 openai>=1.0.0
 pandas>=2.0.0
-pyspark>=3.5.0

@@ -5,3 +5,5 @@ command: [
 env:
   - name: DATABRICKS_SERVING_ENDPOINT
     valueFrom: serving-endpoint
+  - name: SQL_WAREHOUSE_ID
+    valueFrom: sql-warehouse
