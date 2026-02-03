@@ -18,10 +18,9 @@ PGUSER = os.environ.get("PGUSER", "")
 PGPORT = os.environ.get("PGPORT", "5432")
 PGSSLMODE = os.environ.get("PGSSLMODE", "require")
 
-# Lakebase synced table configuration
-# The table is synced from Delta to Lakebase via a synced table
-LAKEBASE_SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "public")
-LAKEBASE_TABLE = os.environ.get("LAKEBASE_TABLE", "support_tickets_synced")
+# Lakebase table configuration
+LAKEBASE_SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "app")
+LAKEBASE_TABLE = os.environ.get("LAKEBASE_TABLE", "support_tickets")
 
 # Validation
 missing = [k for k, v in [("PGHOST", PGHOST), ("PGDATABASE", PGDATABASE), ("PGUSER", PGUSER)] if not v]
@@ -55,17 +54,27 @@ def get_engine() -> Engine:
 # Get current user for ticket assignment
 CURRENT_USER = PGUSER  # The PostgreSQL user (email) for this session
 
-# Verify database connection (table is created by synced table, not the app)
+# Initialize database (creates schema/table if they don't exist)
 def init_db(engine: Engine):
-    """Verify the synced table exists and is accessible."""
-    try:
-        with engine.begin() as conn:
-            # Verify we can query the table
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}"))
-            count = result.scalar()
-            print(f"Database connection verified: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} ({count} rows)")
-    except Exception as e:
-        print(f"Warning: Could not verify table. It may not be synced yet: {e}")
+    """Initialize the database schema and table."""
+    ddl = f"""
+    CREATE SCHEMA IF NOT EXISTS {LAKEBASE_SCHEMA};
+    
+    CREATE TABLE IF NOT EXISTS {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (
+      id BIGSERIAL PRIMARY KEY,
+      title VARCHAR(255) NOT NULL,
+      description TEXT NOT NULL,
+      customer_email VARCHAR(255) NOT NULL,
+      status VARCHAR(50) NOT NULL DEFAULT 'open',
+      priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+      assigned_to VARCHAR(255) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    """
+    with engine.begin() as conn:
+        conn.execute(text(ddl))
+    print(f"Database initialized: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
 
 def get_tickets(engine: Engine, status_filter=None):
     """Fetch tickets from database.
