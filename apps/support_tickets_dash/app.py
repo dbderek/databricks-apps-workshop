@@ -1,5 +1,6 @@
 import os
 import time
+import uuid
 from dash import Dash, html, dcc, Input, Output, State, callback, dash_table, ALL
 import dash_bootstrap_components as dbc
 from sqlalchemy import create_engine, text, event
@@ -10,6 +11,17 @@ import pandas as pd
 
 # Initialize Databricks SDK
 w = sdk.WorkspaceClient()
+
+# Debug: Print all PG-related environment variables
+print("=== Database Environment Variables ===")
+for key, value in sorted(os.environ.items()):
+    if 'PG' in key.upper() or 'DATABASE' in key.upper() or 'DB' in key.upper():
+        # Mask sensitive values
+        if 'PASSWORD' in key.upper() or 'TOKEN' in key.upper():
+            print(f"  {key}: ***masked***")
+        else:
+            print(f"  {key}: {value}")
+print("=" * 40)
 
 # Read Postgres params from environment (injected by Databricks App Database resource)
 PGHOST = os.environ.get("PGHOST", "")
@@ -27,9 +39,21 @@ LAKEBASE_TABLE = os.environ.get("LAKEBASE_TABLE", "support_tickets")
 missing = [k for k, v in [("PGHOST", PGHOST), ("PGDATABASE", PGDATABASE), ("PGUSER", PGUSER)] if not v]
 if missing:
     print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
+else:
+    print(f"Database config: host={PGHOST}, db={PGDATABASE}, user={PGUSER}")
 
 def db_url_without_password() -> str:
     return f"postgresql+psycopg://{PGUSER}:@{PGHOST}:{PGPORT}/{PGDATABASE}"
+
+# Get Lakebase instance name from PGHOST (format: <instance-name>.<region>.lakebase.databricks.com)
+def get_instance_name_from_host(host: str) -> str:
+    """Extract instance name from Lakebase hostname."""
+    if host:
+        return host.split('.')[0]
+    return ""
+
+LAKEBASE_INSTANCE_NAME = get_instance_name_from_host(PGHOST)
+print(f"Detected Lakebase instance name: {LAKEBASE_INSTANCE_NAME}")
 
 def get_engine() -> Engine:
     engine = create_engine(
@@ -38,15 +62,29 @@ def get_engine() -> Engine:
         connect_args={"sslmode": PGSSLMODE},
     )
     
-    # Token refresh mechanism
+    # Token refresh mechanism using database credential generation
     token_cache = {"value": None, "ts": 0}
-    refresh_secs = 15 * 60
+    refresh_secs = 15 * 60  # Refresh token every 15 minutes
     
     @event.listens_for(engine, "do_connect")
     def provide_token(dialect, conn_rec, cargs, cparams):
         now = time.time()
         if token_cache["value"] is None or (now - token_cache["ts"]) > refresh_secs:
-            token_cache["value"] = w.config.oauth_token().access_token
+            try:
+                # Try using database credential generation (preferred for Lakebase)
+                cred = w.database.generate_database_credential(
+                    request_id=str(uuid.uuid4()),
+                    instance_names=[LAKEBASE_INSTANCE_NAME]
+                )
+                token_cache["value"] = cred.token
+                print(f"Generated database credential for instance: {LAKEBASE_INSTANCE_NAME}")
+            except Exception as e:
+                print(f"Warning: generate_database_credential failed ({e}), falling back to oauth_token")
+                try:
+                    token_cache["value"] = w.config.oauth_token().access_token
+                except Exception as e2:
+                    print(f"Error getting oauth_token: {e2}")
+                    raise
             token_cache["ts"] = now
         cparams["password"] = token_cache["value"]
     
@@ -122,10 +160,16 @@ def update_ticket_status(engine: Engine, ticket_id, new_status):
 
 # Initialize engine
 try:
+    if missing:
+        raise ValueError(f"Cannot initialize database - missing env vars: {', '.join(missing)}")
     engine = get_engine()
+    print("Engine created successfully, initializing database...")
     init_db(engine)
+    print("Database initialization complete!")
 except Exception as e:
+    import traceback
     print(f"Database initialization error: {e}")
+    print(f"Traceback:\n{traceback.format_exc()}")
     engine = None
 
 # Initialize Dash app
