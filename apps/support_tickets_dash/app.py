@@ -1,6 +1,6 @@
 import os
 import time
-from dash import Dash, html, dcc, Input, Output, State, callback, dash_table
+from dash import Dash, html, dcc, Input, Output, State, callback, dash_table, ALL
 import dash_bootstrap_components as dbc
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
@@ -327,7 +327,7 @@ def update_tickets_display(n, status_filter, create_clicks, update_clicks):
     Output("selected-ticket-id", "children"),
     Output("modal-ticket-info", "children"),
     Output("modal-new-status", "value"),
-    Input({"type": "update-btn", "index": dash.ALL}, "n_clicks"),
+    Input({"type": "update-btn", "index": ALL}, "n_clicks"),
     Input("close-modal-btn", "n_clicks"),
     Input("update-ticket-btn", "n_clicks"),
     State("update-modal", "is_open"),
