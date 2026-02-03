@@ -3,6 +3,9 @@ command: [
 ]
 env:
   - name: LAKEBASE_SCHEMA
-    value: app
+    value: public
   - name: LAKEBASE_TABLE
     value: support_tickets
+resources:
+  - name: database
+    type: database
