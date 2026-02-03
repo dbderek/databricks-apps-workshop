@@ -99,8 +99,18 @@ st.markdown("""
         background-color: rgba(128, 128, 128, 0.1);
     }
     .stTextArea textarea { font-family: 'Monaco', 'Courier New', monospace; }
-    .stButton button { width: 100%; padding: 0.75rem; font-size: 1rem; font-weight: 600; }
     .streamlit-expanderHeader { font-size: 1.1rem; font-weight: 600; }
+    
+    /* Make all buttons (regular and download) the same height and style */
+    .stButton > button,
+    .stDownloadButton > button {
+        width: 100%;
+        padding: 0.75rem !important;
+        font-size: 1rem !important;
+        font-weight: 600 !important;
+        height: 3rem !important;
+        line-height: 1.5rem !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
