@@ -1,54 +1,81 @@
+"""
+PDF Text Extractor - Streamlit Application
+Extracts text from PDF documents using Databricks Vision AI
+"""
+
 import os
+import base64
+import tempfile
 import streamlit as st
 import pandas as pd
-import tempfile
-import base64
 from databricks.sdk.core import Config
-from pdf_processor import convert_pdf_to_base64, process_images_adaptive
+from pdf_processor import convert_pdf_to_base64, extract_text_from_images
 
-# Page config
+
+# =============================================================================
+# PAGE CONFIGURATION
+# =============================================================================
+
 st.set_page_config(
     page_title="PDF Text Extractor",
     page_icon=":page_facing_up:",
     layout="wide"
 )
 
-# Initialize Databricks configuration
+
+# =============================================================================
+# DATABRICKS AUTHENTICATION & CONFIGURATION
+# =============================================================================
+
 @st.cache_resource
-def get_databricks_config():
-    return Config()
+def initialize_databricks():
+    """
+    Initialize Databricks configuration and authentication.
+    
+    Returns:
+        tuple: (databricks_token, base_url, model_endpoint)
+    """
+    # Get Databricks config
+    cfg = Config()
+    
+    # Build serving endpoint URL
+    host = cfg.host
+    if not host.endswith('/'):
+        host += '/'
+    base_url = host + 'serving-endpoints/'
+    
+    # Get authentication token
+    token = None
+    try:
+        auth_result = cfg.authenticate()
+        if isinstance(auth_result, dict) and 'Authorization' in auth_result:
+            token = auth_result['Authorization'].replace('Bearer ', '')
+        elif hasattr(cfg, 'token') and cfg.token:
+            token = cfg.token
+    except Exception as e:
+        st.error(f"Authentication error: {e}")
+        st.stop()
+    
+    if not token:
+        st.error("Could not retrieve authentication token. Check app permissions.")
+        st.stop()
+    
+    # Get model endpoint from environment
+    model_endpoint = os.getenv("DATABRICKS_SERVING_ENDPOINT")
+    if not model_endpoint:
+        st.error("DATABRICKS_SERVING_ENDPOINT environment variable not set.")
+        st.stop()
+    
+    return token, base_url, model_endpoint
 
-cfg = get_databricks_config()
+# Initialize once and cache
+DATABRICKS_TOKEN, DATABRICKS_BASE_URL, SERVING_ENDPOINT = initialize_databricks()
 
-# Get Databricks configuration
-DATABRICKS_HOST = cfg.host
-if not DATABRICKS_HOST.endswith('/'):
-    DATABRICKS_HOST += '/'
-DATABRICKS_BASE_URL = DATABRICKS_HOST + 'serving-endpoints/'
 
-# Get authentication - try different methods
-DATABRICKS_TOKEN = None
-try:
-    auth_result = cfg.authenticate()
-    if isinstance(auth_result, dict) and 'Authorization' in auth_result:
-        DATABRICKS_TOKEN = auth_result['Authorization'].replace('Bearer ', '')
-    elif hasattr(cfg, 'token') and cfg.token:
-        DATABRICKS_TOKEN = cfg.token
-except Exception as e:
-    st.error(f"Error getting authentication token: {e}")
+# =============================================================================
+# SESSION STATE INITIALIZATION
+# =============================================================================
 
-if not DATABRICKS_TOKEN:
-    st.error("Could not retrieve Databricks authentication token. Please check app permissions.")
-    st.stop()
-
-# Get model endpoint from environment
-SERVING_ENDPOINT = os.getenv("DATABRICKS_SERVING_ENDPOINT")
-
-if not SERVING_ENDPOINT:
-    st.error("DATABRICKS_SERVING_ENDPOINT environment variable is not set. Please configure it in your Databricks App settings.")
-    st.stop()
-
-# Initialize session state
 if "processing_complete" not in st.session_state:
     st.session_state.processing_complete = False
 if "results_df" not in st.session_state:
@@ -56,62 +83,113 @@ if "results_df" not in st.session_state:
 if "uploaded_file_name" not in st.session_state:
     st.session_state.uploaded_file_name = None
 
-# Custom CSS for better styling and dark mode support
+
+# =============================================================================
+# CUSTOM STYLING
+# =============================================================================
+
 st.markdown("""
     <style>
-    /* Main container */
-    .main {
-        padding: 2rem;
-    }
-    
-    /* Headers */
-    h1 {
-        margin-bottom: 0.5rem !important;
-    }
-    
-    /* File uploader */
+    .main { padding: 2rem; }
+    h1 { margin-bottom: 0.5rem !important; }
     .stFileUploader {
         border: 2px dashed #666;
         border-radius: 10px;
         padding: 2rem;
         background-color: rgba(128, 128, 128, 0.1);
     }
-    
-    /* Text areas */
-    .stTextArea textarea {
-        font-family: 'Monaco', 'Courier New', monospace;
-    }
-    
-    /* Buttons */
-    .stButton button {
-        width: 100%;
-        padding: 0.75rem;
-        font-size: 1rem;
-        font-weight: 600;
-    }
-    
-    /* Expanders */
-    .streamlit-expanderHeader {
-        font-size: 1.1rem;
-        font-weight: 600;
-    }
-    
-    /* Download buttons section */
-    .download-section {
-        background-color: rgba(128, 128, 128, 0.1);
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-    }
+    .stTextArea textarea { font-family: 'Monaco', 'Courier New', monospace; }
+    .stButton button { width: 100%; padding: 0.75rem; font-size: 1rem; font-weight: 600; }
+    .streamlit-expanderHeader { font-size: 1.1rem; font-weight: 600; }
     </style>
     """, unsafe_allow_html=True)
+
+
+# =============================================================================
+# HELPER FUNCTIONS
+# =============================================================================
+
+def calculate_worker_config(num_pages):
+    """
+    Calculate optimal worker configuration based on document size.
+    
+    Args:
+        num_pages: Number of pages in the document
+    
+    Returns:
+        tuple: (initial_workers, min_workers, max_workers)
+    """
+    if num_pages <= 5:
+        return 3, 1, 5
+    elif num_pages <= 20:
+        return 5, 2, 10
+    else:
+        return 8, 3, 15
+
+
+def save_to_delta_table(df, table_path):
+    """
+    Save extracted data to Delta table using Databricks SQL.
+    
+    Args:
+        df: DataFrame with extracted text
+        table_path: Full path to Delta table (catalog.schema.table)
+    """
+    from databricks import sql
+    
+    cfg = Config()
+    warehouse_id = os.getenv("SQL_WAREHOUSE_ID")
+    
+    if not warehouse_id:
+        raise ValueError("SQL_WAREHOUSE_ID environment variable not set")
+    
+    # Connect to warehouse
+    conn = sql.connect(
+        server_hostname=cfg.host,
+        http_path=f"/sql/1.0/warehouses/{warehouse_id}",
+        credentials_provider=lambda: cfg.authenticate
+    )
+    
+    # Prepare data (remove base64 images)
+    df_to_save = df[['page_num', 'transcription', 'doc_id']]
+    
+    # Create table
+    create_sql = f"""
+    CREATE TABLE IF NOT EXISTS {table_path} (
+        page_num BIGINT,
+        transcription STRING,
+        doc_id STRING
+    ) USING DELTA
+    """
+    
+    with conn.cursor() as cursor:
+        cursor.execute(create_sql)
+    
+    # Insert data row by row
+    for _, row in df_to_save.iterrows():
+        # Escape single quotes in transcription
+        safe_text = row['transcription'].replace("'", "''")
+        insert_sql = f"""
+        INSERT INTO {table_path} (page_num, transcription, doc_id)
+        VALUES ({row['page_num']}, '{safe_text}', '{row['doc_id']}')
+        """
+        with conn.cursor() as cursor:
+            cursor.execute(insert_sql)
+    
+    conn.close()
+    return len(df_to_save)
+
+
+# =============================================================================
+# MAIN APPLICATION UI
+# =============================================================================
 
 # Header
 st.title("PDF Text Extractor")
 st.caption(f"Extract text from PDFs using Databricks Vision AI • Model: {SERVING_ENDPOINT}")
 st.markdown("---")
 
-# How it works section (above upload)
+# Instructions (collapsed by default)
 with st.expander("How it works", expanded=False):
     st.markdown("""
     ### Simple 3-Step Process
@@ -135,15 +213,16 @@ with st.expander("How it works", expanded=False):
     - Contracts and legal documents
     """)
 
-# Step 1: Upload and Configuration
+# File upload
 uploaded_file = st.file_uploader(
     "Upload PDF Document",
     type=['pdf'],
     help="Select a PDF file to extract text from"
 )
 
+# Main processing logic
 if uploaded_file is not None:
-    # Configuration options
+    # Extraction prompt configuration
     extraction_prompt = st.text_area(
         "Extraction Prompt",
         value="Transcribe the following document into markdown. Please bold all keys in key value pairs, and output sections with section headers.",
@@ -151,10 +230,9 @@ if uploaded_file is not None:
         help="Customize how the AI extracts and formats text"
     )
     
-    process_button = st.button("Extract Text", type="primary", use_container_width=True)
-    
-    # Process the PDF
-    if process_button:
+    # Process button
+    if st.button("Extract Text", type="primary", use_container_width=True):
+        # Reset state
         st.session_state.processing_complete = False
         st.session_state.results_df = None
         st.session_state.uploaded_file_name = uploaded_file.name
@@ -167,67 +245,65 @@ if uploaded_file is not None:
         try:
             st.markdown("---")
             
-            # Processing status
-            status_container = st.container()
-            with status_container:
-                with st.spinner("Processing your document..."):
-                    # Step 1: Convert PDF to images
-                    status_text = st.empty()
-                    progress_bar = st.progress(0)
-                    
-                    status_text.info("Converting PDF pages to images...")
-                    df = convert_pdf_to_base64(tmp_path, dpi=300)
-                    progress_bar.progress(0.3)
-                    
-                    status_text.info(f"Extracting text from {len(df)} pages using AI...")
-                    
-                    # Step 2: Extract text from images (with smart worker configuration)
-                    # Auto-configure workers based on document size
-                    num_pages = len(df)
-                    if num_pages <= 5:
-                        initial_workers, min_workers, max_workers = 3, 1, 5
-                    elif num_pages <= 20:
-                        initial_workers, min_workers, max_workers = 5, 2, 10
-                    else:
-                        initial_workers, min_workers, max_workers = 8, 3, 15
-                    
-                    results_series, stats = process_images_adaptive(
-                        prompt=extraction_prompt,
-                        images=df['base64_img'],
-                        databricks_token=DATABRICKS_TOKEN,
-                        databricks_url=DATABRICKS_BASE_URL,
-                        model=SERVING_ENDPOINT,
-                        initial_workers=initial_workers,
-                        min_workers=min_workers,
-                        max_workers=max_workers
-                    )
-                    
-                    df['transcription'] = results_series
-                    progress_bar.progress(1.0)
-                    
-                    # Store results
-                    st.session_state.results_df = df
-                    st.session_state.processing_complete = True
-                    
-                    status_text.success(f"Successfully extracted text from {stats['success']}/{stats['total']} pages!")
+            with st.spinner("Processing your document..."):
+                # Step 1: Convert PDF to images
+                status_text = st.empty()
+                progress_bar = st.progress(0)
+                
+                status_text.info("Converting PDF pages to images...")
+                df = convert_pdf_to_base64(tmp_path, dpi=300)
+                progress_bar.progress(0.3)
+                
+                # Step 2: Extract text using Vision AI
+                status_text.info(f"Extracting text from {len(df)} pages using AI...")
+                
+                # Auto-configure workers based on document size
+                initial_workers, min_workers, max_workers = calculate_worker_config(len(df))
+                
+                # Process all pages
+                results_series, stats = extract_text_from_images(
+                    prompt=extraction_prompt,
+                    images=df['base64_img'],
+                    databricks_token=DATABRICKS_TOKEN,
+                    databricks_url=DATABRICKS_BASE_URL,
+                    model=SERVING_ENDPOINT,
+                    initial_workers=initial_workers,
+                    min_workers=min_workers,
+                    max_workers=max_workers
+                )
+                
+                # Add results to dataframe
+                df['transcription'] = results_series
+                progress_bar.progress(1.0)
+                
+                # Store in session state
+                st.session_state.results_df = df
+                st.session_state.processing_complete = True
+                
+                status_text.success(f"Successfully extracted text from {stats['success']}/{stats['total']} pages!")
         
         except Exception as e:
             st.error(f"Error processing PDF: {str(e)}")
         
         finally:
+            # Clean up temp file
             try:
                 os.unlink(tmp_path)
             except:
                 pass
 
-# Display results
+
+# =============================================================================
+# RESULTS DISPLAY
+# =============================================================================
+
 if st.session_state.processing_complete and st.session_state.results_df is not None:
     df = st.session_state.results_df
     
     st.markdown("---")
     st.subheader("Extracted Content")
     
-    # Create two columns for side-by-side view
+    # Side-by-side view: PDF preview and extracted text
     col_left, col_right = st.columns([1, 1])
     
     with col_left:
@@ -247,8 +323,6 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
     
     with col_right:
         st.markdown("#### Extracted Text")
-        
-        # Add some spacing to align with the selector
         st.markdown("<br>", unsafe_allow_html=True)
         
         # Display extracted text
@@ -257,7 +331,7 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
         if str(transcription).startswith("ERROR:"):
             st.error(transcription)
         else:
-            # Display in a scrollable container
+            # Scrollable text container
             st.markdown(
                 f"""
                 <div style="
@@ -275,12 +349,13 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
                 unsafe_allow_html=True
             )
     
-    # Export Options at the bottom
+    # Export options
     st.markdown("---")
     st.subheader("Export Options")
     
     col1, col2, col3 = st.columns(3)
     
+    # CSV download
     with col1:
         csv = df[['page_num', 'transcription', 'doc_id']].to_csv(index=False)
         st.download_button(
@@ -292,6 +367,7 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
             key="download_csv"
         )
     
+    # Text download
     with col2:
         transcriptions = "\n\n---PAGE BREAK---\n\n".join(
             df['transcription'].astype(str).tolist()
@@ -305,8 +381,8 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
             key="download_text"
         )
     
+    # Delta table save button
     with col3:
-        # Create a regular button that opens a modal
         if st.button("Save to Delta Table", use_container_width=True, key="open_delta_modal"):
             st.session_state.show_delta_modal = True
     
@@ -331,55 +407,10 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
             
             if submitted and delta_table_path:
                 try:
-                    # Use Databricks SQL connector instead of PySpark
-                    from databricks import sql
-                    from databricks.sdk.core import Config
-                    
-                    cfg = Config()
-                    
-                    # Create connection using SQL warehouse
-                    # Note: This requires SQL_WAREHOUSE_ID to be set in environment
-                    warehouse_id = os.getenv("SQL_WAREHOUSE_ID")
-                    
-                    if not warehouse_id:
-                        st.error("SQL_WAREHOUSE_ID environment variable is not set. Cannot save to Delta table.")
-                    else:
-                        conn = sql.connect(
-                            server_hostname=cfg.host,
-                            http_path=f"/sql/1.0/warehouses/{warehouse_id}",
-                            credentials_provider=lambda: cfg.authenticate
-                        )
-                        
-                        # Create table from DataFrame
-                        df_to_save = df[['page_num', 'transcription', 'doc_id']]
-                        
-                        # Create table if not exists
-                        create_sql = f"""
-                        CREATE TABLE IF NOT EXISTS {delta_table_path} (
-                            page_num BIGINT,
-                            transcription STRING,
-                            doc_id STRING
-                        ) USING DELTA
-                        """
-                        
-                        with conn.cursor() as cursor:
-                            cursor.execute(create_sql)
-                        
-                        # Insert data
-                        for _, row in df_to_save.iterrows():
-                            insert_sql = f"""
-                            INSERT INTO {delta_table_path} (page_num, transcription, doc_id)
-                            VALUES ({row['page_num']}, '{row['transcription'].replace("'", "''")}', '{row['doc_id']}')
-                            """
-                            with conn.cursor() as cursor:
-                                cursor.execute(insert_sql)
-                        
-                        conn.close()
-                        
-                        st.success(f"Successfully saved {len(df_to_save)} rows to {delta_table_path}")
-                        st.session_state.show_delta_modal = False
-                        st.rerun()
-                        
+                    rows_saved = save_to_delta_table(df, delta_table_path)
+                    st.success(f"Successfully saved {rows_saved} rows to {delta_table_path}")
+                    st.session_state.show_delta_modal = False
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Error saving to Delta: {str(e)}")
             
@@ -388,5 +419,4 @@ if st.session_state.processing_complete and st.session_state.results_df is not N
                 st.rerun()
 
 elif uploaded_file is None:
-    # Show instructions when no file is uploaded
     st.info("Upload a PDF document to get started")
