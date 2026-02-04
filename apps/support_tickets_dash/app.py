@@ -5,6 +5,7 @@ from dash import Dash, html, dcc, Input, Output, State, callback, dash_table, AL
 import dash_bootstrap_components as dbc
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
 from databricks import sdk
 from datetime import datetime
 import pandas as pd
@@ -57,37 +58,65 @@ LAKEBASE_INSTANCE_NAME = get_instance_name_from_host(PGHOST)
 print(f"Detected Lakebase instance name: {LAKEBASE_INSTANCE_NAME}")
 
 def get_engine() -> Engine:
+    """Create a SQLAlchemy engine that uses the end-user's credentials when available.
+    
+    This enables PostgreSQL RLS to work correctly by connecting as the actual user,
+    not the service principal. The user's access token is obtained from the
+    X-Forwarded-Access-Token header provided by Databricks Apps.
+    """
     engine = create_engine(
         db_url_without_password(),
         pool_pre_ping=True,
+        # Disable connection pooling to ensure each request gets fresh user credentials
+        poolclass=NullPool,
         connect_args={"sslmode": PGSSLMODE},
     )
     
-    # Token refresh mechanism using database credential generation
-    token_cache = {"value": None, "ts": 0}
-    refresh_secs = 15 * 60  # Refresh token every 15 minutes
+    # Service principal token cache (fallback for initialization)
+    sp_token_cache = {"value": None, "ts": 0}
+    refresh_secs = 15 * 60
     
     @event.listens_for(engine, "do_connect")
     def provide_token(dialect, conn_rec, cargs, cparams):
+        """Dynamically provide credentials for each connection.
+        
+        When in a Flask request context, uses the user's token and email.
+        Otherwise falls back to service principal credentials.
+        """
+        try:
+            # Try to get user credentials from request headers
+            user_email = request.headers.get('X-Forwarded-Email')
+            user_token = request.headers.get('X-Forwarded-Access-Token')
+            
+            if user_email and user_token:
+                # Use the actual user's credentials - this makes RLS work!
+                cparams["user"] = user_email
+                cparams["password"] = user_token
+                print(f"Database connection as user: {user_email}")
+                return
+        except RuntimeError:
+            # No Flask request context (e.g., during initialization)
+            pass
+        
+        # Fallback to service principal credentials
         now = time.time()
-        if token_cache["value"] is None or (now - token_cache["ts"]) > refresh_secs:
+        if sp_token_cache["value"] is None or (now - sp_token_cache["ts"]) > refresh_secs:
             try:
-                # Try using database credential generation (preferred for Lakebase)
                 cred = w.database.generate_database_credential(
                     request_id=str(uuid.uuid4()),
                     instance_names=[LAKEBASE_INSTANCE_NAME]
                 )
-                token_cache["value"] = cred.token
-                print(f"Generated database credential for instance: {LAKEBASE_INSTANCE_NAME}")
+                sp_token_cache["value"] = cred.token
+                print(f"Generated SP credential for instance: {LAKEBASE_INSTANCE_NAME}")
             except Exception as e:
                 print(f"Warning: generate_database_credential failed ({e}), falling back to oauth_token")
                 try:
-                    token_cache["value"] = w.config.oauth_token().access_token
+                    sp_token_cache["value"] = w.config.oauth_token().access_token
                 except Exception as e2:
                     print(f"Error getting oauth_token: {e2}")
                     raise
-            token_cache["ts"] = now
-        cparams["password"] = token_cache["value"]
+            sp_token_cache["ts"] = now
+        cparams["password"] = sp_token_cache["value"]
     
     return engine
 
@@ -186,22 +215,20 @@ Please run the setup notebook before using this app:
 This notebook will create the Lakebase instance, table, and seed data.
 """
 
-def get_tickets(engine: Engine, status_filter=None, user_email=None):
-    """Fetch tickets from database for a specific user.
+def get_tickets(engine: Engine, status_filter=None):
+    """Fetch tickets from database.
     
-    Since the app connects as a service principal (not the end user),
-    PostgreSQL RLS based on current_user doesn't work. Instead, we filter
-    explicitly by the user's email at the application level.
+    Row-level security (RLS) is enabled on this table and filters automatically
+    based on the connected user (current_user). Each user only sees their own tickets.
     """
     sql = f"""
     SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
     FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
-    WHERE assigned_to = :user_email
     """
-    params = {"user_email": user_email}
+    params = {}
     
     if status_filter and status_filter != "all":
-        sql += " AND status = :status"
+        sql += " WHERE status = :status"
         params["status"] = status_filter
     
     sql += " ORDER BY created_at DESC"
@@ -210,19 +237,22 @@ def get_tickets(engine: Engine, status_filter=None, user_email=None):
         result = conn.execute(text(sql), params).mappings().all()
         return pd.DataFrame(result) if result else pd.DataFrame()
 
-def create_ticket(engine: Engine, title, description, customer_email, priority, assigned_to):
-    """Create a new support ticket assigned to the specified user."""
+def create_ticket(engine: Engine, title, description, customer_email, priority):
+    """Create a new support ticket assigned to the current user.
+    
+    Uses PostgreSQL's current_user which is the authenticated user's email
+    when using the user's access token for the connection.
+    """
     sql = f"""
     INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
-    VALUES (:title, :desc, :email, :priority, 'open', :assigned_to)
+    VALUES (:title, :desc, :email, :priority, 'open', current_user)
     """
     with engine.begin() as conn:
         conn.execute(text(sql), {
             "title": title,
             "desc": description,
             "email": customer_email,
-            "priority": priority,
-            "assigned_to": assigned_to
+            "priority": priority
         })
 
 def update_ticket_status(engine: Engine, ticket_id, new_status):
@@ -443,8 +473,7 @@ def create_new_ticket(n_clicks, title, description, email, priority):
         return dbc.Alert("Please fill in all fields", color="warning"), title, description, email, priority
     
     try:
-        current_user = get_current_user()
-        create_ticket(engine, title, description, email, priority, assigned_to=current_user)
+        create_ticket(engine, title, description, email, priority)
         return dbc.Alert("✅ Ticket created successfully!", color="success"), "", "", "", "medium"
     except Exception as e:
         return dbc.Alert(f"❌ Error: {str(e)}", color="danger"), title, description, email, priority
@@ -473,8 +502,7 @@ def update_tickets_display(n, status_filter, create_clicks, update_clicks):
         ], color="warning")
     
     try:
-        current_user = get_current_user()
-        df = get_tickets(engine, status_filter, user_email=current_user)
+        df = get_tickets(engine, status_filter)
         
         if df.empty:
             return dbc.Alert("No tickets found. Create your first ticket using the form on the left!", color="info")
@@ -542,8 +570,7 @@ def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_
     if "update-btn" in trigger_id:
         try:
             ticket_id = eval(trigger_id.split(".")[0])["index"]
-            current_user = get_current_user()
-            df = get_tickets(engine, user_email=current_user)
+            df = get_tickets(engine)
             ticket = df[df['id'] == ticket_id].iloc[0]
             
             info = html.Div([
