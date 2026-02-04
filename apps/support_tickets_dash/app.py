@@ -8,6 +8,7 @@ from sqlalchemy.engine import Engine
 from databricks import sdk
 from datetime import datetime
 import pandas as pd
+from flask import request
 
 # Initialize Databricks SDK
 w = sdk.WorkspaceClient()
@@ -91,7 +92,35 @@ def get_engine() -> Engine:
     return engine
 
 # Get current user for ticket assignment
-CURRENT_USER = PGUSER  # The PostgreSQL user (email) for this session
+# The PGUSER is the service principal, not the actual user
+# We need to get the actual user from request headers in Databricks Apps
+PGUSER_SERVICE_PRINCIPAL = PGUSER
+
+def get_current_user():
+    """Get the actual user identity from Databricks App request headers.
+    
+    Databricks Apps pass the user's email in the X-Forwarded-Email header.
+    Falls back to checking X-Forwarded-User or the service principal.
+    """
+    try:
+        # Try to get user from Databricks App headers
+        user_email = request.headers.get('X-Forwarded-Email')
+        if user_email:
+            return user_email
+        
+        # Fallback: try X-Forwarded-User
+        user = request.headers.get('X-Forwarded-User')
+        if user:
+            return user
+        
+        # Last resort: return service principal (won't match any tickets)
+        return PGUSER_SERVICE_PRINCIPAL
+    except RuntimeError:
+        # No request context (e.g., during initialization)
+        return PGUSER_SERVICE_PRINCIPAL
+
+# For display purposes during initialization
+CURRENT_USER_DISPLAY = "Loading..."
 
 # Check if table exists (don't create - setup notebook handles that)
 def check_table_exists(engine: Engine) -> bool:
@@ -157,27 +186,32 @@ Please run the setup notebook before using this app:
 This notebook will create the Lakebase instance, table, and seed data.
 """
 
-def get_tickets(engine: Engine, status_filter=None):
-    """Fetch tickets from database.
+def get_tickets(engine: Engine, status_filter=None, user_email=None):
+    """Fetch tickets from database for a specific user.
     
-    Note: Row-level security (RLS) is enabled on this table.
-    Users will only see tickets where assigned_to matches their username.
+    Since the app connects as a service principal (not the end user),
+    PostgreSQL RLS based on current_user doesn't work. Instead, we filter
+    explicitly by the user's email at the application level.
     """
     sql = f"""
     SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
     FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
+    WHERE assigned_to = :user_email
     """
+    params = {"user_email": user_email}
+    
     if status_filter and status_filter != "all":
-        sql += " WHERE status = :status"
+        sql += " AND status = :status"
+        params["status"] = status_filter
+    
     sql += " ORDER BY created_at DESC"
     
     with engine.begin() as conn:
-        params = {"status": status_filter} if status_filter and status_filter != "all" else {}
         result = conn.execute(text(sql), params).mappings().all()
         return pd.DataFrame(result) if result else pd.DataFrame()
 
-def create_ticket(engine: Engine, title, description, customer_email, priority):
-    """Create a new support ticket assigned to the current user."""
+def create_ticket(engine: Engine, title, description, customer_email, priority, assigned_to):
+    """Create a new support ticket assigned to the specified user."""
     sql = f"""
     INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
     VALUES (:title, :desc, :email, :priority, 'open', :assigned_to)
@@ -188,7 +222,7 @@ def create_ticket(engine: Engine, title, description, customer_email, priority):
             "desc": description,
             "email": customer_email,
             "priority": priority,
-            "assigned_to": CURRENT_USER
+            "assigned_to": assigned_to
         })
 
 def update_ticket_status(engine: Engine, ticket_id, new_status):
@@ -281,7 +315,7 @@ app.layout = dbc.Container([
             html.H1("🎫 Support Ticket System", className="text-center mb-4 mt-4"),
             html.P([
                 f"Powered by Databricks Lakebase • Logged in as: ",
-                html.Strong(CURRENT_USER)
+                html.Strong(id="current-user-display")
             ], className="text-center text-muted mb-4")
         ])
     ]),
@@ -377,6 +411,17 @@ app.layout = dbc.Container([
 ], fluid=True, className="py-3")
 
 # Callbacks
+
+# Display current user (updated on each refresh)
+@callback(
+    Output("current-user-display", "children"),
+    Input("refresh-interval", "n_intervals")
+)
+def update_user_display(n):
+    user = get_current_user()
+    print(f"Current user from headers: {user}")
+    return user
+
 @callback(
     Output("create-ticket-output", "children"),
     Output("ticket-title", "value"),
@@ -398,7 +443,8 @@ def create_new_ticket(n_clicks, title, description, email, priority):
         return dbc.Alert("Please fill in all fields", color="warning"), title, description, email, priority
     
     try:
-        create_ticket(engine, title, description, email, priority)
+        current_user = get_current_user()
+        create_ticket(engine, title, description, email, priority, assigned_to=current_user)
         return dbc.Alert("✅ Ticket created successfully!", color="success"), "", "", "", "medium"
     except Exception as e:
         return dbc.Alert(f"❌ Error: {str(e)}", color="danger"), title, description, email, priority
@@ -427,7 +473,8 @@ def update_tickets_display(n, status_filter, create_clicks, update_clicks):
         ], color="warning")
     
     try:
-        df = get_tickets(engine, status_filter)
+        current_user = get_current_user()
+        df = get_tickets(engine, status_filter, user_email=current_user)
         
         if df.empty:
             return dbc.Alert("No tickets found. Create your first ticket using the form on the left!", color="info")
@@ -495,7 +542,8 @@ def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_
     if "update-btn" in trigger_id:
         try:
             ticket_id = eval(trigger_id.split(".")[0])["index"]
-            df = get_tickets(engine)
+            current_user = get_current_user()
+            df = get_tickets(engine, user_email=current_user)
             ticket = df[df['id'] == ticket_id].iloc[0]
             
             info = html.Div([
