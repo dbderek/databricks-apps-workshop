@@ -248,30 +248,40 @@ def create_submit_page():
     ], fluid=True)
 
 def create_ticket_card(row):
-    status_class = f"status-{row['status']}"
+    priority_badge_colors = {"low": "#3b82f6", "medium": "#f59e0b", "high": "#ef4444", "critical": "#7c3aed"}
     return html.Div([
-        dbc.Row([
-            dbc.Col([
-                html.Div(row['title'], style={"fontWeight": "600", "color": "#1e293b", "fontSize": "14px"}),
-                html.Div(f"Ticket #{row['id']}", style={"color": "#2563eb", "fontSize": "12px"})
-            ], md=5),
-            dbc.Col([
-                html.Div(row['created_at'].strftime('%I:%M%p') if hasattr(row['created_at'], 'strftime') else "", 
-                        style={"fontSize": "13px", "color": "#64748b"}),
-                html.Div(row['created_at'].strftime('%d/%m/%Y') if hasattr(row['created_at'], 'strftime') else "", 
-                        style={"fontSize": "13px", "color": "#94a3b8"})
-            ], md=3, className="text-center"),
-            dbc.Col([
-                html.Span(row['status'].replace('_', ' ').title(), 
-                         className=f"badge {status_class}", style={"fontSize": "12px"})
-            ], md=2, className="text-center"),
-            dbc.Col([
-                html.Button("→", id={"type": "update-btn", "index": row['id']}, 
-                           className="arrow-btn", style={"border": "2px solid #2563eb", "background": "white",
-                                                         "cursor": "pointer", "fontSize": "18px"})
-            ], md=2, className="text-end")
-        ], className="align-items-center")
-    ], className="ticket-row")
+        html.Div([
+            html.Span(f"#{row['id']}", style={"color": "#2563eb", "fontSize": "12px", "fontWeight": "600"}),
+            html.Span(row['priority'].title(), 
+                     style={"fontSize": "10px", "padding": "2px 6px", "borderRadius": "4px",
+                            "background": priority_badge_colors.get(row['priority'], "#6b7280") + "20",
+                            "color": priority_badge_colors.get(row['priority'], "#6b7280"),
+                            "fontWeight": "600", "float": "right"})
+        ], className="mb-2"),
+        html.Div(row['title'], style={"fontWeight": "600", "color": "#1e293b", "fontSize": "14px", 
+                                       "lineHeight": "1.3", "marginBottom": "8px"}),
+        html.Div(row['customer_email'], style={"fontSize": "12px", "color": "#64748b", "marginBottom": "8px"}),
+        html.Div([
+            html.Span(row['created_at'].strftime('%b %d') if hasattr(row['created_at'], 'strftime') else "", 
+                     style={"fontSize": "11px", "color": "#94a3b8"}),
+            html.Button("Update", id={"type": "update-btn", "index": row['id']}, 
+                       style={"fontSize": "12px", "padding": "4px 12px", "borderRadius": "6px",
+                              "border": "1px solid #2563eb", "background": "white", "color": "#2563eb",
+                              "cursor": "pointer", "fontWeight": "500", "float": "right"})
+        ])
+    ], style={"background": "white", "borderRadius": "12px", "padding": "14px", "marginBottom": "10px",
+              "border": "1px solid #f1f5f9", "boxShadow": "0 1px 3px rgba(0,0,0,0.04)"})
+
+def create_column(status, label, color):
+    return html.Div([
+        html.Div([
+            html.Span(label, style={"fontWeight": "600", "color": "#1e293b", "fontSize": "14px"}),
+            html.Span(id=f"count-{status}", style={"marginLeft": "8px", "padding": "2px 8px", 
+                                                    "borderRadius": "10px", "fontSize": "12px",
+                                                    "background": color + "20", "color": color, "fontWeight": "600"})
+        ], style={"marginBottom": "16px"}),
+        html.Div(id=f"column-{status}")
+    ], style={"background": "#f8fafc", "borderRadius": "16px", "padding": "16px", "minHeight": "500px"})
 
 def create_board_page():
     if not engine or not table_exists:
@@ -280,28 +290,17 @@ def create_board_page():
         ])
     
     return dbc.Container([
-        dbc.Row([
-            dbc.Col([
-                html.H2("My Tickets", className="mb-1", style={"fontWeight": "700", "color": "#1e293b"}),
-                html.P("View and manage tickets assigned to you.", className="text-muted mb-4"),
-                
-                # Filter tabs
-                html.Div([
-                    dbc.ButtonGroup([
-                        dbc.Button("All", id="filter-all", color="primary", outline=True, size="sm", className="px-3"),
-                        dbc.Button("Open", id="filter-open", color="primary", outline=True, size="sm", className="px-3"),
-                        dbc.Button("In Progress", id="filter-in-progress", color="primary", outline=True, size="sm", className="px-3"),
-                        dbc.Button("Resolved", id="filter-resolved", color="primary", outline=True, size="sm", className="px-3"),
-                        dbc.Button("Closed", id="filter-closed", color="primary", outline=True, size="sm", className="px-3"),
-                    ], className="mb-4")
-                ]),
-                
-                # Tickets container
-                html.Div([
-                    html.Div(id="tickets-list")
-                ], className="card-modern p-4")
-            ], lg=10, className="mx-auto")
+        html.Div([
+            html.H2("My Tickets", className="mb-1", style={"fontWeight": "700", "color": "#1e293b"}),
+            html.P("View and manage tickets assigned to you.", className="text-muted mb-4"),
         ]),
+        
+        dbc.Row([
+            dbc.Col([create_column("open", "Open", "#ef4444")], md=3),
+            dbc.Col([create_column("in_progress", "In Progress", "#f59e0b")], md=3),
+            dbc.Col([create_column("resolved", "Resolved", "#22c55e")], md=3),
+            dbc.Col([create_column("closed", "Closed", "#6b7280")], md=3),
+        ], className="g-3"),
         
         dbc.Modal([
             dbc.ModalHeader(dbc.ModalTitle("Update Status", style={"fontWeight": "600"})),
@@ -322,7 +321,6 @@ def create_board_page():
             ])
         ], id="update-modal", is_open=False, centered=True),
         
-        dcc.Store(id="status-filter-store", data="all"),
         html.Div(id="selected-ticket-id", style={"display": "none"}),
         html.Div(id="update-trigger", style={"display": "none"})
     ], fluid=True, className="py-4")
@@ -379,37 +377,32 @@ def submit_ticket(n, title, desc, email, priority, assignee):
         return dbc.Alert(f"Error: {e}", color="danger"), title, desc, email, priority
 
 @callback(
-    Output("status-filter-store", "data"),
-    Input("filter-all", "n_clicks"), Input("filter-open", "n_clicks"),
-    Input("filter-in-progress", "n_clicks"), Input("filter-resolved", "n_clicks"),
-    Input("filter-closed", "n_clicks"), prevent_initial_call=True
-)
-def update_filter(all_c, open_c, prog_c, res_c, closed_c):
-    from dash import ctx
-    if not ctx.triggered_id:
-        return "all"
-    mapping = {"filter-all": "all", "filter-open": "open", "filter-in-progress": "in_progress",
-               "filter-resolved": "resolved", "filter-closed": "closed"}
-    return mapping.get(ctx.triggered_id, "all")
-
-@callback(
-    Output("tickets-list", "children"),
+    Output("column-open", "children"), Output("column-in_progress", "children"),
+    Output("column-resolved", "children"), Output("column-closed", "children"),
+    Output("count-open", "children"), Output("count-in_progress", "children"),
+    Output("count-resolved", "children"), Output("count-closed", "children"),
     Input("refresh-interval", "n_intervals"), Input("update-trigger", "children"),
-    Input("current-page", "data"), Input("status-filter-store", "data")
+    Input("current-page", "data")
 )
-def update_tickets_list(n, trigger, page, status_filter):
+def update_board(n, trigger, page):
+    empty = html.P("No tickets", style={"color": "#94a3b8", "fontSize": "13px", "textAlign": "center", "marginTop": "20px"})
     if page != "board" or not engine or not table_exists:
-        return html.Div()
+        return empty, empty, empty, empty, "0", "0", "0", "0"
     try:
-        df = get_tickets(engine, status_filter if status_filter != "all" else None)
-        if df.empty:
-            return html.Div([
-                html.P("No tickets found.", className="text-muted text-center py-4")
-            ])
-        cards = [create_ticket_card(row) for _, row in df.iterrows()]
-        return html.Div(cards)
+        df = get_tickets(engine)
+        results = []
+        counts = []
+        for status in ["open", "in_progress", "resolved", "closed"]:
+            filtered = df[df['status'] == status] if not df.empty else pd.DataFrame()
+            counts.append(str(len(filtered)))
+            if filtered.empty:
+                results.append(empty)
+            else:
+                cards = [create_ticket_card(row) for _, row in filtered.iterrows()]
+                results.append(html.Div(cards))
+        return results[0], results[1], results[2], results[3], counts[0], counts[1], counts[2], counts[3]
     except Exception:
-        return html.Div()
+        return empty, empty, empty, empty, "0", "0", "0", "0"
 
 @callback(
     Output("update-modal", "is_open"), Output("selected-ticket-id", "children"),
