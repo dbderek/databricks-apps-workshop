@@ -6,68 +6,50 @@ from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 from databricks import sdk
-from datetime import datetime
 import pandas as pd
 from flask import request
 
 # Initialize Databricks SDK
 w = sdk.WorkspaceClient()
 
-# Read Postgres params from environment (injected by Databricks App Database resource)
+# Database configuration
 PGHOST = os.environ.get("PGHOST", "")
 PGDATABASE = os.environ.get("PGDATABASE", "")
 PGUSER = os.environ.get("PGUSER", "")
 PGPORT = os.environ.get("PGPORT", "5432")
 PGSSLMODE = os.environ.get("PGSSLMODE", "require")
-
-# Lakebase table configuration
 LAKEBASE_SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "public")
 LAKEBASE_TABLE = os.environ.get("LAKEBASE_TABLE", "support_tickets")
 
-# Validation
 missing = [k for k, v in [("PGHOST", PGHOST), ("PGDATABASE", PGDATABASE), ("PGUSER", PGUSER)] if not v]
-if missing:
-    print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
 
-def db_url_without_password() -> str:
+def db_url_without_password():
     return f"postgresql+psycopg://{PGUSER}:@{PGHOST}:{PGPORT}/{PGDATABASE}"
 
-def get_engine() -> Engine:
-    """Create a SQLAlchemy engine that uses the end-user's credentials.
-    
-    With 'on behalf of user authorization' enabled in Databricks Apps,
-    the user's access token is available via X-Forwarded-Access-Token header.
-    This enables PostgreSQL RLS to work correctly based on current_user.
-    """
+def get_engine():
     engine = create_engine(
         db_url_without_password(),
         pool_pre_ping=True,
-        poolclass=NullPool,  # Disable pooling for per-user connections
+        poolclass=NullPool,
         connect_args={"sslmode": PGSSLMODE},
     )
     
-    # Fallback token cache for initialization (when no request context)
     fallback_token_cache = {"value": None, "ts": 0}
-    refresh_secs = 15 * 60
     
     @event.listens_for(engine, "do_connect")
     def provide_token(dialect, conn_rec, cargs, cparams):
-        """Provide user credentials for each connection."""
         try:
-            # Get user credentials from request headers
             user_email = request.headers.get('X-Forwarded-Email')
             user_token = request.headers.get('X-Forwarded-Access-Token')
-            
             if user_email and user_token:
                 cparams["user"] = user_email
                 cparams["password"] = user_token
                 return
         except RuntimeError:
-            pass  # No request context
+            pass
         
-        # Fallback to service principal for initialization
         now = time.time()
-        if fallback_token_cache["value"] is None or (now - fallback_token_cache["ts"]) > refresh_secs:
+        if fallback_token_cache["value"] is None or (now - fallback_token_cache["ts"]) > 900:
             try:
                 fallback_token_cache["value"] = w.config.oauth_token().access_token
             except Exception:
@@ -78,363 +60,333 @@ def get_engine() -> Engine:
     return engine
 
 def get_current_user():
-    """Get the current user's email from request headers."""
     try:
         return request.headers.get('X-Forwarded-Email', 'Unknown')
     except RuntimeError:
         return 'Unknown'
 
-# Check if table exists
-def check_table_exists(engine: Engine) -> bool:
-    """Check if the support tickets table exists."""
-    sql = """
-    SELECT EXISTS (
-        SELECT 1 FROM information_schema.tables 
-        WHERE table_schema = :schema AND table_name = :table
-    );
-    """
+def check_table_exists(engine):
+    sql = "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = :schema AND table_name = :table)"
     with engine.begin() as conn:
-        result = conn.execute(text(sql), {"schema": LAKEBASE_SCHEMA, "table": LAKEBASE_TABLE}).scalar()
-        return result
+        return conn.execute(text(sql), {"schema": LAKEBASE_SCHEMA, "table": LAKEBASE_TABLE}).scalar()
 
-def get_tickets(engine: Engine, status_filter=None):
-    """Fetch tickets from database.
-    
-    RLS filters automatically based on current_user (the connected user's email).
-    """
+def get_all_users(engine):
+    """Get distinct users from existing tickets for the assignee dropdown."""
+    sql = f"SELECT DISTINCT assigned_to FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} ORDER BY assigned_to"
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(sql)).fetchall()
+            return [row[0] for row in result]
+    except Exception:
+        return []
+
+def get_tickets(engine, status_filter=None):
     sql = f"""
     SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
     FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
     """
     params = {}
-    
     if status_filter and status_filter != "all":
         sql += " WHERE status = :status"
         params["status"] = status_filter
-    
     sql += " ORDER BY created_at DESC"
     
     with engine.begin() as conn:
         result = conn.execute(text(sql), params).mappings().all()
         return pd.DataFrame(result) if result else pd.DataFrame()
 
-def create_ticket(engine: Engine, title, description, customer_email, priority):
-    """Create a new support ticket assigned to the current user."""
+def create_ticket(engine, title, description, customer_email, priority, assigned_to):
     sql = f"""
     INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
-    VALUES (:title, :desc, :email, :priority, 'open', current_user)
+    VALUES (:title, :desc, :email, :priority, 'open', :assigned_to)
     """
     with engine.begin() as conn:
         conn.execute(text(sql), {
-            "title": title,
-            "desc": description,
-            "email": customer_email,
-            "priority": priority
+            "title": title, "desc": description, "email": customer_email,
+            "priority": priority, "assigned_to": assigned_to
         })
 
-def update_ticket_status(engine: Engine, ticket_id, new_status):
-    """Update ticket status."""
-    sql = f"""
-    UPDATE {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
-    SET status = :status, updated_at = now()
-    WHERE id = :id
-    """
+def update_ticket_status(engine, ticket_id, new_status):
+    sql = f"UPDATE {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} SET status = :status, updated_at = now() WHERE id = :id"
     with engine.begin() as conn:
         conn.execute(text(sql), {"status": new_status, "id": ticket_id})
 
-# Initialize engine and check table
+# Initialize
 engine = None
 table_exists = False
-init_error = None
-
 try:
-    if missing:
-        raise ValueError(f"Missing env vars: {', '.join(missing)}")
-    engine = get_engine()
-    table_exists = check_table_exists(engine)
-    if table_exists:
-        print(f"Table verified: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
-    else:
-        print(f"Table not found: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
+    if not missing:
+        engine = get_engine()
+        table_exists = check_table_exists(engine)
 except Exception as e:
-    init_error = str(e)
-    print(f"Database initialization error: {e}")
+    print(f"Database error: {e}")
 
-# Initialize Dash app
-app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
-app.title = "Support Ticket System"
+# App setup
+app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY], suppress_callback_exceptions=True)
+app.title = "Support Tickets"
 
-# Status/priority colors
+# Styles
+CARD_STYLE = {"borderRadius": "8px", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}
+TICKET_CARD_STYLE = {"borderRadius": "6px", "marginBottom": "8px", "boxShadow": "0 1px 3px rgba(0,0,0,0.08)"}
+COLUMN_STYLE = {"backgroundColor": "#f8f9fa", "borderRadius": "8px", "padding": "12px", "minHeight": "400px"}
+
 status_colors = {"open": "danger", "in_progress": "warning", "resolved": "success", "closed": "secondary"}
 priority_colors = {"low": "info", "medium": "warning", "high": "danger", "critical": "dark"}
 
-# Warning alert helper
-def get_warning_alert():
-    if init_error:
-        return dbc.Alert([
-            html.H4("Database Connection Error", className="alert-heading"),
-            html.P(f"Error: {init_error}"),
-        ], color="danger", className="mb-4")
-    elif not table_exists:
-        return dbc.Alert([
-            html.H4("Table Not Found", className="alert-heading"),
-            html.P(f"Please run setup-lakebase.ipynb to create the table."),
-        ], color="warning", className="mb-4")
-    return None
+def create_navbar(current_page):
+    return dbc.Navbar(
+        dbc.Container([
+            dbc.NavbarBrand("Support Tickets", className="fw-bold"),
+            dbc.Nav([
+                dbc.NavItem(dbc.NavLink("Submit Ticket", href="#", id="nav-submit", 
+                    active=current_page == "submit", className="px-3")),
+                dbc.NavItem(dbc.NavLink("My Tickets", href="#", id="nav-board", 
+                    active=current_page == "board", className="px-3")),
+            ], className="ms-auto"),
+            html.Div(id="user-display", className="text-muted ms-3 small")
+        ], fluid=True),
+        color="white", className="border-bottom mb-4", style={"boxShadow": "0 1px 3px rgba(0,0,0,0.1)"}
+    )
 
-warning_alert = get_warning_alert()
-
-# Layout
-app.layout = dbc.Container([
-    warning_alert if warning_alert else html.Div(),
+def create_submit_page():
+    users = get_all_users(engine) if engine and table_exists else []
+    user_options = [{"label": u, "value": u} for u in users]
     
-    dbc.Row([
-        dbc.Col([
-            html.H1("🎫 Support Ticket System", className="text-center mb-4 mt-4"),
-            html.P([
-                "Powered by Databricks Lakebase • Logged in as: ",
-                html.Strong(id="current-user-display")
-            ], className="text-center text-muted mb-4")
-        ])
-    ]),
-    
-    dbc.Row([
-        # Left column - Create Ticket
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader(html.H4("📝 Create New Ticket")),
-                dbc.CardBody([
-                    dbc.Label("Title"),
-                    dbc.Input(id="ticket-title", placeholder="Brief description of the issue", className="mb-3"),
-                    
-                    dbc.Label("Description"),
-                    dbc.Textarea(id="ticket-description", placeholder="Detailed description...", className="mb-3", rows=4),
-                    
-                    dbc.Label("Customer Email"),
-                    dbc.Input(id="ticket-email", type="email", placeholder="customer@example.com", className="mb-3"),
-                    
-                    dbc.Label("Priority"),
-                    dbc.Select(
-                        id="ticket-priority",
-                        options=[
-                            {"label": "🟢 Low", "value": "low"},
-                            {"label": "🟡 Medium", "value": "medium"},
-                            {"label": "🔴 High", "value": "high"},
-                            {"label": "⚫ Critical", "value": "critical"}
-                        ],
-                        value="medium",
-                        className="mb-3"
-                    ),
-                    
-                    dbc.Button("Create Ticket", id="create-ticket-btn", color="primary", className="w-100"),
-                    html.Div(id="create-ticket-output", className="mt-3")
-                ])
-            ])
-        ], width=4),
-        
-        # Right column - Tickets List
-        dbc.Col([
-            dbc.Card([
-                dbc.CardHeader([
-                    dbc.Row([
-                        dbc.Col(html.H4("📋 My Tickets"), width=6),
-                        dbc.Col([
-                            dbc.Select(
-                                id="status-filter",
-                                options=[
-                                    {"label": "All", "value": "all"},
-                                    {"label": "Open", "value": "open"},
-                                    {"label": "In Progress", "value": "in_progress"},
-                                    {"label": "Resolved", "value": "resolved"},
-                                    {"label": "Closed", "value": "closed"}
-                                ],
-                                value="all",
-                                size="sm"
-                            )
-                        ], width=6)
+    return dbc.Container([
+        dbc.Row([
+            dbc.Col([
+                dbc.Card([
+                    dbc.CardHeader(html.H5("Submit a Support Ticket", className="mb-0")),
+                    dbc.CardBody([
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label("Title", className="fw-medium"),
+                                dbc.Input(id="ticket-title", placeholder="Brief summary of the issue", className="mb-3"),
+                            ], md=12),
+                        ]),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label("Description", className="fw-medium"),
+                                dbc.Textarea(id="ticket-description", placeholder="Detailed description of the issue...", 
+                                           rows=4, className="mb-3"),
+                            ], md=12),
+                        ]),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label("Your Email", className="fw-medium"),
+                                dbc.Input(id="ticket-email", type="email", placeholder="you@example.com", className="mb-3"),
+                            ], md=6),
+                            dbc.Col([
+                                dbc.Label("Priority", className="fw-medium"),
+                                dbc.Select(id="ticket-priority", options=[
+                                    {"label": "Low", "value": "low"},
+                                    {"label": "Medium", "value": "medium"},
+                                    {"label": "High", "value": "high"},
+                                    {"label": "Critical", "value": "critical"}
+                                ], value="medium", className="mb-3"),
+                            ], md=6),
+                        ]),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label("Assign To", className="fw-medium"),
+                                dbc.Select(id="ticket-assignee", options=user_options,
+                                          placeholder="Select team member...", className="mb-3"),
+                            ], md=12),
+                        ]),
+                        dbc.Button("Submit Ticket", id="create-ticket-btn", color="primary", className="w-100 mt-2"),
+                        html.Div(id="create-ticket-output", className="mt-3")
                     ])
-                ]),
-                dbc.CardBody([
-                    html.Div(id="tickets-container", style={"maxHeight": "600px", "overflowY": "auto"})
-                ])
-            ])
-        ], width=8)
-    ]),
+                ], style=CARD_STYLE)
+            ], md=6, className="mx-auto")
+        ], className="justify-content-center")
+    ], fluid=True)
+
+def create_ticket_card(row):
+    return dbc.Card([
+        dbc.CardBody([
+            html.Div([
+                html.Span(f"#{row['id']}", className="text-muted small me-2"),
+                dbc.Badge(row['priority'].title(), color=priority_colors.get(row['priority'], "secondary"), 
+                         className="float-end", style={"fontSize": "10px"})
+            ]),
+            html.H6(row['title'], className="mt-1 mb-2", style={"fontSize": "14px"}),
+            html.P(row['description'][:80] + "..." if len(row['description']) > 80 else row['description'],
+                  className="text-muted small mb-2", style={"fontSize": "12px"}),
+            html.Div([
+                html.Small(row['customer_email'], className="text-muted"),
+            ]),
+            dbc.Button("Update", id={"type": "update-btn", "index": row['id']}, 
+                      size="sm", color="outline-primary", className="mt-2 w-100")
+        ], className="p-2")
+    ], style=TICKET_CARD_STYLE)
+
+def create_board_page():
+    if not engine or not table_exists:
+        return dbc.Container([
+            dbc.Alert("Database not configured. Please run setup-lakebase.ipynb first.", color="warning")
+        ])
     
-    # Update Modal
-    dbc.Modal([
-        dbc.ModalHeader(dbc.ModalTitle("Update Ticket Status")),
-        dbc.ModalBody([
-            html.Div(id="modal-ticket-info"),
-            html.Hr(),
-            dbc.Label("New Status"),
-            dbc.Select(
-                id="modal-new-status",
-                options=[
+    return dbc.Container([
+        dbc.Row([
+            dbc.Col([html.Div(id="board-open", style=COLUMN_STYLE)], md=3),
+            dbc.Col([html.Div(id="board-in-progress", style=COLUMN_STYLE)], md=3),
+            dbc.Col([html.Div(id="board-resolved", style=COLUMN_STYLE)], md=3),
+            dbc.Col([html.Div(id="board-closed", style=COLUMN_STYLE)], md=3),
+        ], className="g-3"),
+        
+        dbc.Modal([
+            dbc.ModalHeader(dbc.ModalTitle("Update Status")),
+            dbc.ModalBody([
+                html.Div(id="modal-ticket-info"),
+                html.Hr(),
+                dbc.Label("New Status"),
+                dbc.Select(id="modal-new-status", options=[
                     {"label": "Open", "value": "open"},
                     {"label": "In Progress", "value": "in_progress"},
                     {"label": "Resolved", "value": "resolved"},
                     {"label": "Closed", "value": "closed"}
-                ]
-            )
-        ]),
-        dbc.ModalFooter([
-            dbc.Button("Cancel", id="close-modal-btn", className="me-2"),
-            dbc.Button("Update", id="update-ticket-btn", color="primary")
-        ])
-    ], id="update-modal", is_open=False),
-    
-    html.Div(id="selected-ticket-id", style={"display": "none"}),
+                ])
+            ]),
+            dbc.ModalFooter([
+                dbc.Button("Cancel", id="close-modal-btn", color="secondary", className="me-2"),
+                dbc.Button("Update", id="update-ticket-btn", color="primary")
+            ])
+        ], id="update-modal", is_open=False),
+        
+        html.Div(id="selected-ticket-id", style={"display": "none"}),
+        html.Div(id="update-trigger", style={"display": "none"})
+    ], fluid=True)
+
+# Layout
+app.layout = html.Div([
+    dcc.Store(id="current-page", data="submit"),
+    dcc.Store(id="refresh-trigger", data=0),
+    html.Div(id="navbar-container"),
+    html.Div(id="page-content"),
     dcc.Interval(id="refresh-interval", interval=30000, n_intervals=0)
-    
-], fluid=True, className="py-3")
+])
 
 # Callbacks
-@callback(
-    Output("current-user-display", "children"),
-    Input("refresh-interval", "n_intervals")
-)
-def update_user_display(n):
-    return get_current_user()
+@callback(Output("navbar-container", "children"), Input("current-page", "data"))
+def update_navbar(page):
+    return create_navbar(page)
+
+@callback(Output("user-display", "children"), Input("refresh-interval", "n_intervals"))
+def update_user(n):
+    user = get_current_user()
+    return f"Logged in: {user}" if user != "Unknown" else ""
+
+@callback(Output("current-page", "data"), Input("nav-submit", "n_clicks"), Input("nav-board", "n_clicks"),
+          State("current-page", "data"), prevent_initial_call=True)
+def navigate(submit_clicks, board_clicks, current):
+    from dash import ctx
+    if not ctx.triggered_id:
+        return current
+    return "submit" if ctx.triggered_id == "nav-submit" else "board"
+
+@callback(Output("page-content", "children"), Input("current-page", "data"), Input("refresh-trigger", "data"))
+def render_page(page, trigger):
+    return create_submit_page() if page == "submit" else create_board_page()
 
 @callback(
     Output("create-ticket-output", "children"),
-    Output("ticket-title", "value"),
-    Output("ticket-description", "value"),
-    Output("ticket-email", "value"),
-    Output("ticket-priority", "value"),
+    Output("ticket-title", "value"), Output("ticket-description", "value"),
+    Output("ticket-email", "value"), Output("ticket-priority", "value"),
     Input("create-ticket-btn", "n_clicks"),
-    State("ticket-title", "value"),
-    State("ticket-description", "value"),
-    State("ticket-email", "value"),
-    State("ticket-priority", "value"),
-    prevent_initial_call=True
+    State("ticket-title", "value"), State("ticket-description", "value"),
+    State("ticket-email", "value"), State("ticket-priority", "value"),
+    State("ticket-assignee", "value"), prevent_initial_call=True
 )
-def create_new_ticket(n_clicks, title, description, email, priority):
-    if engine is None or not table_exists:
-        return dbc.Alert("Database not ready.", color="danger"), title, description, email, priority
-    
-    if not all([title, description, email]):
-        return dbc.Alert("Please fill in all fields", color="warning"), title, description, email, priority
-    
+def submit_ticket(n, title, desc, email, priority, assignee):
+    if not engine or not table_exists:
+        return dbc.Alert("Database not ready.", color="danger"), title, desc, email, priority
+    if not all([title, desc, email, assignee]):
+        return dbc.Alert("Please fill all fields including assignee.", color="warning"), title, desc, email, priority
     try:
-        create_ticket(engine, title, description, email, priority)
-        return dbc.Alert("✅ Ticket created!", color="success"), "", "", "", "medium"
+        create_ticket(engine, title, desc, email, priority, assignee)
+        return dbc.Alert("Ticket submitted successfully!", color="success"), "", "", "", "medium"
     except Exception as e:
-        return dbc.Alert(f"Error: {str(e)}", color="danger"), title, description, email, priority
+        return dbc.Alert(f"Error: {e}", color="danger"), title, desc, email, priority
+
+def create_column_content(df, status, label):
+    filtered = df[df['status'] == status] if not df.empty else pd.DataFrame()
+    count = len(filtered)
+    cards = [create_ticket_card(row) for _, row in filtered.iterrows()] if not filtered.empty else []
+    return html.Div([
+        html.Div([
+            html.H6(label, className="mb-0 fw-bold"),
+            dbc.Badge(str(count), color=status_colors.get(status, "secondary"), className="ms-2")
+        ], className="d-flex align-items-center mb-3"),
+        html.Div(cards if cards else [html.P("No tickets", className="text-muted small text-center")])
+    ])
 
 @callback(
-    Output("tickets-container", "children"),
-    Input("refresh-interval", "n_intervals"),
-    Input("status-filter", "value"),
-    Input("create-ticket-btn", "n_clicks"),
-    Input("update-ticket-btn", "n_clicks")
+    Output("board-open", "children"), Output("board-in-progress", "children"),
+    Output("board-resolved", "children"), Output("board-closed", "children"),
+    Input("refresh-interval", "n_intervals"), Input("update-trigger", "children"),
+    Input("current-page", "data")
 )
-def update_tickets_display(n, status_filter, create_clicks, update_clicks):
-    if engine is None:
-        return dbc.Alert("Database not connected.", color="danger")
-    
-    if not table_exists:
-        return dbc.Alert("Table not found. Run setup-lakebase.ipynb first.", color="warning")
-    
+def update_board(n, trigger, page):
+    if page != "board" or not engine or not table_exists:
+        return [html.Div()]*4
     try:
-        df = get_tickets(engine, status_filter)
-        
-        if df.empty:
-            return dbc.Alert("No tickets found. Create your first ticket!", color="info")
-        
-        tickets = []
-        for _, row in df.iterrows():
-            ticket_card = dbc.Card([
-                dbc.CardHeader([
-                    dbc.Row([
-                        dbc.Col(html.Strong(f"#{row['id']} - {row['title']}"), width=7),
-                        dbc.Col([
-                            dbc.Badge(row['status'].replace('_', ' ').title(), 
-                                     color=status_colors.get(row['status'], "secondary"), className="me-2"),
-                            dbc.Badge(row['priority'].title(), 
-                                     color=priority_colors.get(row['priority'], "info"))
-                        ], width=5, className="text-end")
-                    ])
-                ]),
-                dbc.CardBody([
-                    html.P(row['description'], className="mb-2"),
-                    html.Small([
-                        row['customer_email'], " • ",
-                        row['created_at'].strftime('%Y-%m-%d %H:%M') if hasattr(row['created_at'], 'strftime') else str(row['created_at'])
-                    ], className="text-muted"),
-                    html.Div([
-                        dbc.Button("Update Status", id={"type": "update-btn", "index": row['id']}, 
-                                  size="sm", color="primary", className="mt-2")
-                    ])
-                ])
-            ], className="mb-3")
-            tickets.append(ticket_card)
-        
-        return tickets
-    except Exception as e:
-        return dbc.Alert(f"Error: {str(e)}", color="danger")
+        df = get_tickets(engine)
+        return (
+            create_column_content(df, "open", "Open"),
+            create_column_content(df, "in_progress", "In Progress"),
+            create_column_content(df, "resolved", "Resolved"),
+            create_column_content(df, "closed", "Closed")
+        )
+    except Exception:
+        return [html.Div()]*4
 
 @callback(
-    Output("update-modal", "is_open"),
-    Output("selected-ticket-id", "children"),
-    Output("modal-ticket-info", "children"),
-    Output("modal-new-status", "value"),
+    Output("update-modal", "is_open"), Output("selected-ticket-id", "children"),
+    Output("modal-ticket-info", "children"), Output("modal-new-status", "value"),
+    Output("update-trigger", "children"),
     Input({"type": "update-btn", "index": ALL}, "n_clicks"),
-    Input("close-modal-btn", "n_clicks"),
-    Input("update-ticket-btn", "n_clicks"),
-    State("update-modal", "is_open"),
-    State("selected-ticket-id", "children"),
-    State("modal-new-status", "value"),
-    prevent_initial_call=True
+    Input("close-modal-btn", "n_clicks"), Input("update-ticket-btn", "n_clicks"),
+    State("update-modal", "is_open"), State("selected-ticket-id", "children"),
+    State("modal-new-status", "value"), prevent_initial_call=True
 )
-def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_id, new_status):
-    from dash import callback_context
+def handle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_id, new_status):
+    from dash import ctx
+    import time as t
     
-    if not callback_context.triggered:
-        return False, None, "", None
+    if not ctx.triggered_id:
+        return False, None, "", None, ""
     
-    # Get the trigger info
-    triggered = callback_context.triggered[0]
-    trigger_id = triggered["prop_id"]
-    trigger_value = triggered["value"]
+    triggered = ctx.triggered[0]
+    if not triggered.get("value"):
+        return False, None, "", None, ""
     
-    # Ignore if no actual click happened (value is None or 0)
-    if not trigger_value:
-        return False, None, "", None
+    trigger_id = ctx.triggered_id
     
-    if engine is None or not table_exists:
-        return False, None, "", None
-    
-    # Handle update button click on a ticket card
-    if "update-btn" in trigger_id:
+    if isinstance(trigger_id, dict) and trigger_id.get("type") == "update-btn":
+        ticket_id = trigger_id["index"]
         try:
-            ticket_id = eval(trigger_id.split(".")[0])["index"]
             df = get_tickets(engine)
             ticket = df[df['id'] == ticket_id].iloc[0]
-            
             info = html.Div([
-                html.H5(f"Ticket #{ticket['id']}: {ticket['title']}"),
-                html.P(f"Current Status: {ticket['status'].replace('_', ' ').title()}")
+                html.H6(f"Ticket #{ticket['id']}: {ticket['title']}"),
+                html.P(f"Current: {ticket['status'].replace('_', ' ').title()}", className="text-muted")
             ])
-            
-            return True, ticket_id, info, ticket['status']
+            return True, ticket_id, info, ticket['status'], ""
         except Exception:
-            return False, None, "", None
+            return False, None, "", None, ""
     
-    # Handle confirm update button in modal
-    if "update-ticket-btn" in trigger_id and selected_id:
+    if trigger_id == "update-ticket-btn" and selected_id:
         try:
             update_ticket_status(engine, int(selected_id), new_status)
+            return False, None, "", None, str(t.time())
         except Exception:
             pass
-        return False, None, "", None
+        return False, None, "", None, ""
     
-    # Handle close/cancel button
-    if "close-modal-btn" in trigger_id:
-        return False, None, "", None
+    if trigger_id == "close-modal-btn":
+        return False, None, "", None, ""
     
-    return False, None, "", None
+    return False, None, "", None, ""
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080, debug=False)
