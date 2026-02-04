@@ -106,26 +106,47 @@ def check_table_exists(engine: Engine) -> bool:
         result = conn.execute(text(sql), {"schema": LAKEBASE_SCHEMA, "table": LAKEBASE_TABLE}).scalar()
         return result
 
-def list_all_tables(engine: Engine):
-    """List all tables in the database for debugging."""
-    sql = """
-    SELECT table_schema, table_name 
-    FROM information_schema.tables 
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    ORDER BY table_schema, table_name;
-    """
+def debug_database_state(engine: Engine):
+    """Debug database connection and table state."""
     try:
         with engine.begin() as conn:
-            result = conn.execute(text(sql)).fetchall()
-            if result:
-                print("=== Tables in database ===")
-                for row in result:
-                    print(f"  {row[0]}.{row[1]}")
-                print("=" * 30)
+            # Check current database and user
+            result = conn.execute(text("SELECT current_database(), current_user, current_schema()")).fetchone()
+            print(f"=== Database Debug Info ===")
+            print(f"  Connected to database: {result[0]}")
+            print(f"  Connected as user: {result[1]}")
+            print(f"  Current schema: {result[2]}")
+            
+            # List all schemas
+            schemas = conn.execute(text("SELECT schema_name FROM information_schema.schemata")).fetchall()
+            print(f"  Available schemas: {[s[0] for s in schemas]}")
+            
+            # List all tables (no filter)
+            tables = conn.execute(text("""
+                SELECT table_schema, table_name 
+                FROM information_schema.tables 
+                WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+                ORDER BY table_schema, table_name
+            """)).fetchall()
+            
+            if tables:
+                print(f"  Tables found:")
+                for t in tables:
+                    print(f"    - {t[0]}.{t[1]}")
             else:
-                print("No user tables found in database!")
+                print(f"  No user tables found!")
+            
+            # Try direct query on expected table
+            print(f"\n  Checking for table: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
+            try:
+                count = conn.execute(text(f"SELECT COUNT(*) FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")).scalar()
+                print(f"  Direct query SUCCESS! Row count: {count}")
+            except Exception as table_err:
+                print(f"  Direct query FAILED: {table_err}")
+            
+            print("=" * 40)
     except Exception as e:
-        print(f"Error listing tables: {e}")
+        print(f"Debug error: {e}")
 
 TABLE_MISSING_WARNING = f"""
 ⚠️ Table '{LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}' does not exist!
@@ -194,10 +215,9 @@ try:
     if table_exists:
         print(f"Table verified: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
     else:
-        print(f"WARNING: Table {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} does not exist!")
-        print("Please run setup-lakebase.ipynb to create the table.")
-        print("\nListing all tables in the database for debugging:")
-        list_all_tables(engine)
+        print(f"WARNING: Table {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} does not exist according to information_schema!")
+        print("Running detailed debug...")
+        debug_database_state(engine)
 except Exception as e:
     import traceback
     init_error = str(e)
