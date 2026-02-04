@@ -5,7 +5,6 @@ from dash import Dash, html, dcc, Input, Output, State, callback, dash_table, AL
 import dash_bootstrap_components as dbc
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.pool import NullPool
 from databricks import sdk
 from datetime import datetime
 import pandas as pd
@@ -67,8 +66,6 @@ def get_engine() -> Engine:
     engine = create_engine(
         db_url_without_password(),
         pool_pre_ping=True,
-        # Disable connection pooling to ensure each request gets fresh user credentials
-        poolclass=NullPool,
         connect_args={"sslmode": PGSSLMODE},
     )
     
@@ -78,35 +75,12 @@ def get_engine() -> Engine:
     
     @event.listens_for(engine, "do_connect")
     def provide_token(dialect, conn_rec, cargs, cparams):
-        """Dynamically provide credentials for each connection.
+        """Provide service principal credentials for database connection.
         
-        When in a Flask request context, uses the user's token and email.
-        Otherwise falls back to service principal credentials.
+        Note: User isolation is handled via session variables set in each query,
+        not by connecting as different users. This is because Databricks Apps
+        don't provide X-Forwarded-Access-Token for database authentication.
         """
-        print(f"=== do_connect called ===")
-        try:
-            # Try to get user credentials from request headers
-            user_email = request.headers.get('X-Forwarded-Email')
-            user_token = request.headers.get('X-Forwarded-Access-Token')
-            
-            print(f"  In request context: True")
-            print(f"  X-Forwarded-Email: {user_email}")
-            print(f"  X-Forwarded-Access-Token present: {bool(user_token)}")
-            
-            if user_email and user_token:
-                # Use the actual user's credentials - this makes RLS work!
-                cparams["user"] = user_email
-                cparams["password"] = user_token
-                print(f"  -> Using user credentials for: {user_email}")
-                return
-            else:
-                print(f"  -> Missing user credentials, falling back to SP")
-        except RuntimeError as e:
-            # No Flask request context (e.g., during initialization)
-            print(f"  In request context: False ({e})")
-            pass
-        
-        # Fallback to service principal credentials
         now = time.time()
         if sp_token_cache["value"] is None or (now - sp_token_cache["ts"]) > refresh_secs:
             try:
@@ -226,26 +200,15 @@ This notebook will create the Lakebase instance, table, and seed data.
 def get_tickets(engine: Engine, status_filter=None):
     """Fetch tickets from database.
     
-    Row-level security (RLS) is enabled on this table and filters automatically
-    based on the connected user (current_user). Each user only sees their own tickets.
+    RLS is configured to check the app.current_user_email session variable,
+    which we set at the start of each query using the user's email from headers.
     """
+    current_user_email = get_current_user()
+    
     with engine.begin() as conn:
-        # Debug: Check current_user and RLS status
-        debug_info = conn.execute(text("""
-            SELECT current_user as db_user,
-                   (SELECT COUNT(*) FROM public.support_tickets) as total_visible_rows
-        """)).mappings().first()
-        print(f"=== Query Debug ===")
-        print(f"  PostgreSQL current_user: {debug_info['db_user']}")
-        print(f"  Rows visible to this user: {debug_info['total_visible_rows']}")
-        
-        # Check if there are matching rows with explicit filter (bypassing RLS check)
-        match_check = conn.execute(text("""
-            SELECT COUNT(*) as matches FROM public.support_tickets 
-            WHERE assigned_to = current_user
-        """)).scalar()
-        print(f"  Rows where assigned_to = current_user: {match_check}")
-        print(f"==================")
+        # Set session variable for RLS policy to use
+        conn.execute(text("SET app.current_user_email = :email"), {"email": current_user_email})
+        print(f"Set app.current_user_email = {current_user_email}")
         
         sql = f"""
         SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
@@ -260,20 +223,24 @@ def get_tickets(engine: Engine, status_filter=None):
         sql += " ORDER BY created_at DESC"
         
         result = conn.execute(text(sql), params).mappings().all()
-        print(f"  Query returned {len(result)} rows")
+        print(f"Query returned {len(result)} rows")
         return pd.DataFrame(result) if result else pd.DataFrame()
 
 def create_ticket(engine: Engine, title, description, customer_email, priority):
     """Create a new support ticket assigned to the current user.
     
-    Uses PostgreSQL's current_user which is the authenticated user's email
-    when using the user's access token for the connection.
+    Uses the app.current_user_email session variable for the assigned_to field.
     """
-    sql = f"""
-    INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
-    VALUES (:title, :desc, :email, :priority, 'open', current_user)
-    """
+    current_user_email = get_current_user()
+    
     with engine.begin() as conn:
+        # Set session variable for RLS policy
+        conn.execute(text("SET app.current_user_email = :email"), {"email": current_user_email})
+        
+        sql = f"""
+        INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
+        VALUES (:title, :desc, :email, :priority, 'open', current_setting('app.current_user_email'))
+        """
         conn.execute(text(sql), {
             "title": title,
             "desc": description,
