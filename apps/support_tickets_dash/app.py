@@ -221,20 +221,38 @@ def get_tickets(engine: Engine, status_filter=None):
     Row-level security (RLS) is enabled on this table and filters automatically
     based on the connected user (current_user). Each user only sees their own tickets.
     """
-    sql = f"""
-    SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
-    FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
-    """
-    params = {}
-    
-    if status_filter and status_filter != "all":
-        sql += " WHERE status = :status"
-        params["status"] = status_filter
-    
-    sql += " ORDER BY created_at DESC"
-    
     with engine.begin() as conn:
+        # Debug: Check current_user and RLS status
+        debug_info = conn.execute(text("""
+            SELECT current_user as db_user,
+                   (SELECT COUNT(*) FROM public.support_tickets) as total_visible_rows
+        """)).mappings().first()
+        print(f"=== Query Debug ===")
+        print(f"  PostgreSQL current_user: {debug_info['db_user']}")
+        print(f"  Rows visible to this user: {debug_info['total_visible_rows']}")
+        
+        # Check if there are matching rows with explicit filter (bypassing RLS check)
+        match_check = conn.execute(text("""
+            SELECT COUNT(*) as matches FROM public.support_tickets 
+            WHERE assigned_to = current_user
+        """)).scalar()
+        print(f"  Rows where assigned_to = current_user: {match_check}")
+        print(f"==================")
+        
+        sql = f"""
+        SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
+        FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
+        """
+        params = {}
+        
+        if status_filter and status_filter != "all":
+            sql += " WHERE status = :status"
+            params["status"] = status_filter
+        
+        sql += " ORDER BY created_at DESC"
+        
         result = conn.execute(text(sql), params).mappings().all()
+        print(f"  Query returned {len(result)} rows")
         return pd.DataFrame(result) if result else pd.DataFrame()
 
 def create_ticket(engine: Engine, title, description, customer_email, priority):
