@@ -394,11 +394,19 @@ def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_
     if not callback_context.triggered:
         return False, None, "", None
     
+    # Get the trigger info
+    triggered = callback_context.triggered[0]
+    trigger_id = triggered["prop_id"]
+    trigger_value = triggered["value"]
+    
+    # Ignore if no actual click happened (value is None or 0)
+    if not trigger_value:
+        return False, None, "", None
+    
     if engine is None or not table_exists:
         return False, None, "", None
     
-    trigger_id = callback_context.triggered[0]["prop_id"]
-    
+    # Handle update button click on a ticket card
     if "update-btn" in trigger_id:
         try:
             ticket_id = eval(trigger_id.split(".")[0])["index"]
@@ -414,11 +422,16 @@ def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_
         except Exception:
             return False, None, "", None
     
+    # Handle confirm update button in modal
     if "update-ticket-btn" in trigger_id and selected_id:
         try:
             update_ticket_status(engine, int(selected_id), new_status)
         except Exception:
             pass
+        return False, None, "", None
+    
+    # Handle close/cancel button
+    if "close-modal-btn" in trigger_id:
         return False, None, "", None
     
     return False, None, "", None
