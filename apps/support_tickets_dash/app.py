@@ -122,13 +122,60 @@ except Exception as e:
     print(f"Database error: {e}")
 
 # App setup
-app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY], suppress_callback_exceptions=True)
+app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
 app.title = "Support Tickets"
 
+# Custom CSS for modern styling
+app.index_string = '''
+<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            * { font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif; }
+            body { background: linear-gradient(135deg, #e8f4fc 0%, #f0f7ff 100%); min-height: 100vh; }
+            .card-modern { background: white; border-radius: 16px; border: 1px solid #e5e7eb; box-shadow: 0 4px 12px rgba(0,0,0,0.05); }
+            .card-modern:hover { box-shadow: 0 8px 24px rgba(0,0,0,0.08); }
+            .btn-primary { background: #2563eb; border-color: #2563eb; border-radius: 8px; font-weight: 500; }
+            .btn-primary:hover { background: #1d4ed8; border-color: #1d4ed8; }
+            .btn-outline-primary { border-radius: 8px; border-width: 2px; }
+            .navbar { background: white !important; }
+            .nav-link { font-weight: 500; color: #64748b !important; }
+            .nav-link.active { color: #2563eb !important; }
+            .badge { border-radius: 6px; font-weight: 500; padding: 6px 12px; }
+            .form-control, .form-select { border-radius: 10px; border-color: #e5e7eb; padding: 10px 14px; }
+            .form-control:focus, .form-select:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+            .ticket-row { background: white; border-radius: 12px; padding: 16px 20px; margin-bottom: 12px; 
+                          border: 1px solid #f1f5f9; transition: all 0.2s; }
+            .ticket-row:hover { border-color: #e2e8f0; box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+            .column-header { font-size: 14px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; }
+            .status-open { background: #fee2e2; color: #dc2626; }
+            .status-in_progress { background: #fef3c7; color: #d97706; }
+            .status-resolved { background: #d1fae5; color: #059669; }
+            .status-closed { background: #e5e7eb; color: #6b7280; }
+            .arrow-btn { width: 40px; height: 40px; border-radius: 10px; border: 2px solid #2563eb; 
+                        color: #2563eb; display: flex; align-items: center; justify-content: center; }
+            .arrow-btn:hover { background: #2563eb; color: white; }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>
+'''
+
 # Styles
-CARD_STYLE = {"borderRadius": "8px", "boxShadow": "0 2px 4px rgba(0,0,0,0.1)"}
-TICKET_CARD_STYLE = {"borderRadius": "6px", "marginBottom": "8px", "boxShadow": "0 1px 3px rgba(0,0,0,0.08)"}
-COLUMN_STYLE = {"backgroundColor": "#f8f9fa", "borderRadius": "8px", "padding": "12px", "minHeight": "400px"}
+CARD_STYLE = {"borderRadius": "16px", "border": "none", "boxShadow": "0 4px 12px rgba(0,0,0,0.05)"}
+COLUMN_STYLE = {"backgroundColor": "white", "borderRadius": "16px", "padding": "20px", "minHeight": "400px",
+                "border": "1px dashed #e2e8f0"}
 
 status_colors = {"open": "danger", "in_progress": "warning", "resolved": "success", "closed": "secondary"}
 priority_colors = {"low": "info", "medium": "warning", "high": "danger", "critical": "dark"}
@@ -136,7 +183,10 @@ priority_colors = {"low": "info", "medium": "warning", "high": "danger", "critic
 def create_navbar(current_page):
     return dbc.Navbar(
         dbc.Container([
-            dbc.NavbarBrand("Support Tickets", className="fw-bold"),
+            html.Div([
+                html.Span("*", style={"color": "#2563eb", "fontSize": "24px", "marginRight": "8px"}),
+                dbc.NavbarBrand("Ticket Center", style={"color": "#2563eb", "fontWeight": "700", "fontSize": "20px"})
+            ], className="d-flex align-items-center"),
             dbc.Nav([
                 dbc.NavItem(dbc.NavLink("Submit Ticket", href="#", id="nav-submit", 
                     active=current_page == "submit", className="px-3")),
@@ -145,7 +195,7 @@ def create_navbar(current_page):
             ], className="ms-auto"),
             html.Div(id="user-display", className="text-muted ms-3 small")
         ], fluid=True),
-        color="white", className="border-bottom mb-4", style={"boxShadow": "0 1px 3px rgba(0,0,0,0.1)"}
+        color="white", className="mb-4", style={"boxShadow": "0 2px 8px rgba(0,0,0,0.06)", "borderRadius": "0"}
     )
 
 def create_submit_page():
@@ -155,70 +205,73 @@ def create_submit_page():
     return dbc.Container([
         dbc.Row([
             dbc.Col([
-                dbc.Card([
-                    dbc.CardHeader(html.H5("Submit a Support Ticket", className="mb-0")),
-                    dbc.CardBody([
+                html.Div([
+                    html.H2("Submit a Ticket", className="mb-1", style={"fontWeight": "700", "color": "#1e293b"}),
+                    html.P("Fill out the form below to create a new support request.", 
+                          className="text-muted mb-4"),
+                    
+                    html.Div([
+                        dbc.Label("Title", className="fw-semibold mb-2", style={"color": "#374151"}),
+                        dbc.Input(id="ticket-title", placeholder="Brief summary of the issue", className="mb-4"),
+                        
+                        dbc.Label("Description", className="fw-semibold mb-2", style={"color": "#374151"}),
+                        dbc.Textarea(id="ticket-description", placeholder="Detailed description of the issue...", 
+                                   rows=4, className="mb-4"),
+                        
                         dbc.Row([
                             dbc.Col([
-                                dbc.Label("Title", className="fw-medium"),
-                                dbc.Input(id="ticket-title", placeholder="Brief summary of the issue", className="mb-3"),
-                            ], md=12),
-                        ]),
-                        dbc.Row([
-                            dbc.Col([
-                                dbc.Label("Description", className="fw-medium"),
-                                dbc.Textarea(id="ticket-description", placeholder="Detailed description of the issue...", 
-                                           rows=4, className="mb-3"),
-                            ], md=12),
-                        ]),
-                        dbc.Row([
-                            dbc.Col([
-                                dbc.Label("Your Email", className="fw-medium"),
-                                dbc.Input(id="ticket-email", type="email", placeholder="you@example.com", className="mb-3"),
+                                dbc.Label("Your Email", className="fw-semibold mb-2", style={"color": "#374151"}),
+                                dbc.Input(id="ticket-email", type="email", placeholder="you@example.com", className="mb-4"),
                             ], md=6),
                             dbc.Col([
-                                dbc.Label("Priority", className="fw-medium"),
+                                dbc.Label("Priority", className="fw-semibold mb-2", style={"color": "#374151"}),
                                 dbc.Select(id="ticket-priority", options=[
                                     {"label": "Low", "value": "low"},
                                     {"label": "Medium", "value": "medium"},
                                     {"label": "High", "value": "high"},
                                     {"label": "Critical", "value": "critical"}
-                                ], value="medium", className="mb-3"),
+                                ], value="medium", className="mb-4"),
                             ], md=6),
                         ]),
-                        dbc.Row([
-                            dbc.Col([
-                                dbc.Label("Assign To", className="fw-medium"),
-                                dbc.Select(id="ticket-assignee", options=user_options,
-                                          placeholder="Select team member...", className="mb-3"),
-                            ], md=12),
-                        ]),
-                        dbc.Button("Submit Ticket", id="create-ticket-btn", color="primary", className="w-100 mt-2"),
+                        
+                        dbc.Label("Assign To", className="fw-semibold mb-2", style={"color": "#374151"}),
+                        dbc.Select(id="ticket-assignee", options=user_options,
+                                  placeholder="Select team member...", className="mb-4"),
+                        
+                        dbc.Button("Submit Ticket", id="create-ticket-btn", color="primary", 
+                                  className="w-100 py-2", style={"fontSize": "16px", "fontWeight": "600"}),
                         html.Div(id="create-ticket-output", className="mt-3")
-                    ])
-                ], style=CARD_STYLE)
-            ], md=6, className="mx-auto")
+                    ], className="card-modern p-4")
+                ], className="py-4")
+            ], lg=5, md=7, className="mx-auto")
         ], className="justify-content-center")
     ], fluid=True)
 
 def create_ticket_card(row):
-    return dbc.Card([
-        dbc.CardBody([
-            html.Div([
-                html.Span(f"#{row['id']}", className="text-muted small me-2"),
-                dbc.Badge(row['priority'].title(), color=priority_colors.get(row['priority'], "secondary"), 
-                         className="float-end", style={"fontSize": "10px"})
-            ]),
-            html.H6(row['title'], className="mt-1 mb-2", style={"fontSize": "14px"}),
-            html.P(row['description'][:80] + "..." if len(row['description']) > 80 else row['description'],
-                  className="text-muted small mb-2", style={"fontSize": "12px"}),
-            html.Div([
-                html.Small(row['customer_email'], className="text-muted"),
-            ]),
-            dbc.Button("Update", id={"type": "update-btn", "index": row['id']}, 
-                      size="sm", color="outline-primary", className="mt-2 w-100")
-        ], className="p-2")
-    ], style=TICKET_CARD_STYLE)
+    status_class = f"status-{row['status']}"
+    return html.Div([
+        dbc.Row([
+            dbc.Col([
+                html.Div(row['title'], style={"fontWeight": "600", "color": "#1e293b", "fontSize": "14px"}),
+                html.Div(f"Ticket #{row['id']}", style={"color": "#2563eb", "fontSize": "12px"})
+            ], md=5),
+            dbc.Col([
+                html.Div(row['created_at'].strftime('%I:%M%p') if hasattr(row['created_at'], 'strftime') else "", 
+                        style={"fontSize": "13px", "color": "#64748b"}),
+                html.Div(row['created_at'].strftime('%d/%m/%Y') if hasattr(row['created_at'], 'strftime') else "", 
+                        style={"fontSize": "13px", "color": "#94a3b8"})
+            ], md=3, className="text-center"),
+            dbc.Col([
+                html.Span(row['status'].replace('_', ' ').title(), 
+                         className=f"badge {status_class}", style={"fontSize": "12px"})
+            ], md=2, className="text-center"),
+            dbc.Col([
+                html.Button("→", id={"type": "update-btn", "index": row['id']}, 
+                           className="arrow-btn", style={"border": "2px solid #2563eb", "background": "white",
+                                                         "cursor": "pointer", "fontSize": "18px"})
+            ], md=2, className="text-end")
+        ], className="align-items-center")
+    ], className="ticket-row")
 
 def create_board_page():
     if not engine or not table_exists:
@@ -228,34 +281,51 @@ def create_board_page():
     
     return dbc.Container([
         dbc.Row([
-            dbc.Col([html.Div(id="board-open", style=COLUMN_STYLE)], md=3),
-            dbc.Col([html.Div(id="board-in-progress", style=COLUMN_STYLE)], md=3),
-            dbc.Col([html.Div(id="board-resolved", style=COLUMN_STYLE)], md=3),
-            dbc.Col([html.Div(id="board-closed", style=COLUMN_STYLE)], md=3),
-        ], className="g-3"),
+            dbc.Col([
+                html.H2("My Tickets", className="mb-1", style={"fontWeight": "700", "color": "#1e293b"}),
+                html.P("View and manage tickets assigned to you.", className="text-muted mb-4"),
+                
+                # Filter tabs
+                html.Div([
+                    dbc.ButtonGroup([
+                        dbc.Button("All", id="filter-all", color="primary", outline=True, size="sm", className="px-3"),
+                        dbc.Button("Open", id="filter-open", color="primary", outline=True, size="sm", className="px-3"),
+                        dbc.Button("In Progress", id="filter-in-progress", color="primary", outline=True, size="sm", className="px-3"),
+                        dbc.Button("Resolved", id="filter-resolved", color="primary", outline=True, size="sm", className="px-3"),
+                        dbc.Button("Closed", id="filter-closed", color="primary", outline=True, size="sm", className="px-3"),
+                    ], className="mb-4")
+                ]),
+                
+                # Tickets container
+                html.Div([
+                    html.Div(id="tickets-list")
+                ], className="card-modern p-4")
+            ], lg=10, className="mx-auto")
+        ]),
         
         dbc.Modal([
-            dbc.ModalHeader(dbc.ModalTitle("Update Status")),
+            dbc.ModalHeader(dbc.ModalTitle("Update Status", style={"fontWeight": "600"})),
             dbc.ModalBody([
                 html.Div(id="modal-ticket-info"),
                 html.Hr(),
-                dbc.Label("New Status"),
+                dbc.Label("New Status", className="fw-semibold"),
                 dbc.Select(id="modal-new-status", options=[
                     {"label": "Open", "value": "open"},
                     {"label": "In Progress", "value": "in_progress"},
                     {"label": "Resolved", "value": "resolved"},
                     {"label": "Closed", "value": "closed"}
-                ])
+                ], className="mb-3")
             ]),
             dbc.ModalFooter([
-                dbc.Button("Cancel", id="close-modal-btn", color="secondary", className="me-2"),
+                dbc.Button("Cancel", id="close-modal-btn", outline=True, color="secondary", className="me-2"),
                 dbc.Button("Update", id="update-ticket-btn", color="primary")
             ])
-        ], id="update-modal", is_open=False),
+        ], id="update-modal", is_open=False, centered=True),
         
+        dcc.Store(id="status-filter-store", data="all"),
         html.Div(id="selected-ticket-id", style={"display": "none"}),
         html.Div(id="update-trigger", style={"display": "none"})
-    ], fluid=True)
+    ], fluid=True, className="py-4")
 
 # Layout
 app.layout = html.Div([
@@ -308,37 +378,38 @@ def submit_ticket(n, title, desc, email, priority, assignee):
     except Exception as e:
         return dbc.Alert(f"Error: {e}", color="danger"), title, desc, email, priority
 
-def create_column_content(df, status, label):
-    filtered = df[df['status'] == status] if not df.empty else pd.DataFrame()
-    count = len(filtered)
-    cards = [create_ticket_card(row) for _, row in filtered.iterrows()] if not filtered.empty else []
-    return html.Div([
-        html.Div([
-            html.H6(label, className="mb-0 fw-bold"),
-            dbc.Badge(str(count), color=status_colors.get(status, "secondary"), className="ms-2")
-        ], className="d-flex align-items-center mb-3"),
-        html.Div(cards if cards else [html.P("No tickets", className="text-muted small text-center")])
-    ])
+@callback(
+    Output("status-filter-store", "data"),
+    Input("filter-all", "n_clicks"), Input("filter-open", "n_clicks"),
+    Input("filter-in-progress", "n_clicks"), Input("filter-resolved", "n_clicks"),
+    Input("filter-closed", "n_clicks"), prevent_initial_call=True
+)
+def update_filter(all_c, open_c, prog_c, res_c, closed_c):
+    from dash import ctx
+    if not ctx.triggered_id:
+        return "all"
+    mapping = {"filter-all": "all", "filter-open": "open", "filter-in-progress": "in_progress",
+               "filter-resolved": "resolved", "filter-closed": "closed"}
+    return mapping.get(ctx.triggered_id, "all")
 
 @callback(
-    Output("board-open", "children"), Output("board-in-progress", "children"),
-    Output("board-resolved", "children"), Output("board-closed", "children"),
+    Output("tickets-list", "children"),
     Input("refresh-interval", "n_intervals"), Input("update-trigger", "children"),
-    Input("current-page", "data")
+    Input("current-page", "data"), Input("status-filter-store", "data")
 )
-def update_board(n, trigger, page):
+def update_tickets_list(n, trigger, page, status_filter):
     if page != "board" or not engine or not table_exists:
-        return [html.Div()]*4
+        return html.Div()
     try:
-        df = get_tickets(engine)
-        return (
-            create_column_content(df, "open", "Open"),
-            create_column_content(df, "in_progress", "In Progress"),
-            create_column_content(df, "resolved", "Resolved"),
-            create_column_content(df, "closed", "Closed")
-        )
+        df = get_tickets(engine, status_filter if status_filter != "all" else None)
+        if df.empty:
+            return html.Div([
+                html.P("No tickets found.", className="text-muted text-center py-4")
+            ])
+        cards = [create_ticket_card(row) for _, row in df.iterrows()]
+        return html.Div(cards)
     except Exception:
-        return [html.Div()]*4
+        return html.Div()
 
 @callback(
     Output("update-modal", "is_open"), Output("selected-ticket-id", "children"),
