@@ -83,19 +83,27 @@ def get_engine() -> Engine:
         When in a Flask request context, uses the user's token and email.
         Otherwise falls back to service principal credentials.
         """
+        print(f"=== do_connect called ===")
         try:
             # Try to get user credentials from request headers
             user_email = request.headers.get('X-Forwarded-Email')
             user_token = request.headers.get('X-Forwarded-Access-Token')
             
+            print(f"  In request context: True")
+            print(f"  X-Forwarded-Email: {user_email}")
+            print(f"  X-Forwarded-Access-Token present: {bool(user_token)}")
+            
             if user_email and user_token:
                 # Use the actual user's credentials - this makes RLS work!
                 cparams["user"] = user_email
                 cparams["password"] = user_token
-                print(f"Database connection as user: {user_email}")
+                print(f"  -> Using user credentials for: {user_email}")
                 return
-        except RuntimeError:
+            else:
+                print(f"  -> Missing user credentials, falling back to SP")
+        except RuntimeError as e:
             # No Flask request context (e.g., during initialization)
+            print(f"  In request context: False ({e})")
             pass
         
         # Fallback to service principal credentials
