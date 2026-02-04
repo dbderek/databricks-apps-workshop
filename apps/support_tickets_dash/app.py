@@ -1,10 +1,10 @@
 import os
 import time
-import uuid
-from dash import Dash, html, dcc, Input, Output, State, callback, dash_table, ALL
+from dash import Dash, html, dcc, Input, Output, State, callback, ALL
 import dash_bootstrap_components as dbc
 from sqlalchemy import create_engine, text, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
 from databricks import sdk
 from datetime import datetime
 import pandas as pd
@@ -12,17 +12,6 @@ from flask import request
 
 # Initialize Databricks SDK
 w = sdk.WorkspaceClient()
-
-# Debug: Print all PG-related environment variables
-print("=== Database Environment Variables ===")
-for key, value in sorted(os.environ.items()):
-    if 'PG' in key.upper() or 'DATABASE' in key.upper() or 'DB' in key.upper():
-        # Mask sensitive values
-        if 'PASSWORD' in key.upper() or 'TOKEN' in key.upper():
-            print(f"  {key}: ***masked***")
-        else:
-            print(f"  {key}: {value}")
-print("=" * 40)
 
 # Read Postgres params from environment (injected by Databricks App Database resource)
 PGHOST = os.environ.get("PGHOST", "")
@@ -32,7 +21,6 @@ PGPORT = os.environ.get("PGPORT", "5432")
 PGSSLMODE = os.environ.get("PGSSLMODE", "require")
 
 # Lakebase table configuration
-# Using "public" schema which exists by default in PostgreSQL
 LAKEBASE_SCHEMA = os.environ.get("LAKEBASE_SCHEMA", "public")
 LAKEBASE_TABLE = os.environ.get("LAKEBASE_TABLE", "support_tickets")
 
@@ -40,100 +28,63 @@ LAKEBASE_TABLE = os.environ.get("LAKEBASE_TABLE", "support_tickets")
 missing = [k for k, v in [("PGHOST", PGHOST), ("PGDATABASE", PGDATABASE), ("PGUSER", PGUSER)] if not v]
 if missing:
     print(f"ERROR: Missing required environment variables: {', '.join(missing)}")
-else:
-    print(f"Database config: host={PGHOST}, db={PGDATABASE}, user={PGUSER}")
 
 def db_url_without_password() -> str:
     return f"postgresql+psycopg://{PGUSER}:@{PGHOST}:{PGPORT}/{PGDATABASE}"
 
-# Get Lakebase instance name from PGHOST (format: <instance-name>.<region>.lakebase.databricks.com)
-def get_instance_name_from_host(host: str) -> str:
-    """Extract instance name from Lakebase hostname."""
-    if host:
-        return host.split('.')[0]
-    return ""
-
-LAKEBASE_INSTANCE_NAME = get_instance_name_from_host(PGHOST)
-print(f"Detected Lakebase instance name: {LAKEBASE_INSTANCE_NAME}")
-
 def get_engine() -> Engine:
-    """Create a SQLAlchemy engine that uses the end-user's credentials when available.
+    """Create a SQLAlchemy engine that uses the end-user's credentials.
     
-    This enables PostgreSQL RLS to work correctly by connecting as the actual user,
-    not the service principal. The user's access token is obtained from the
-    X-Forwarded-Access-Token header provided by Databricks Apps.
+    With 'on behalf of user authorization' enabled in Databricks Apps,
+    the user's access token is available via X-Forwarded-Access-Token header.
+    This enables PostgreSQL RLS to work correctly based on current_user.
     """
     engine = create_engine(
         db_url_without_password(),
         pool_pre_ping=True,
+        poolclass=NullPool,  # Disable pooling for per-user connections
         connect_args={"sslmode": PGSSLMODE},
     )
     
-    # Service principal token cache (fallback for initialization)
-    sp_token_cache = {"value": None, "ts": 0}
+    # Fallback token cache for initialization (when no request context)
+    fallback_token_cache = {"value": None, "ts": 0}
     refresh_secs = 15 * 60
     
     @event.listens_for(engine, "do_connect")
     def provide_token(dialect, conn_rec, cargs, cparams):
-        """Provide service principal credentials for database connection.
+        """Provide user credentials for each connection."""
+        try:
+            # Get user credentials from request headers
+            user_email = request.headers.get('X-Forwarded-Email')
+            user_token = request.headers.get('X-Forwarded-Access-Token')
+            
+            if user_email and user_token:
+                cparams["user"] = user_email
+                cparams["password"] = user_token
+                return
+        except RuntimeError:
+            pass  # No request context
         
-        Note: User isolation is handled via session variables set in each query,
-        not by connecting as different users. This is because Databricks Apps
-        don't provide X-Forwarded-Access-Token for database authentication.
-        """
+        # Fallback to service principal for initialization
         now = time.time()
-        if sp_token_cache["value"] is None or (now - sp_token_cache["ts"]) > refresh_secs:
+        if fallback_token_cache["value"] is None or (now - fallback_token_cache["ts"]) > refresh_secs:
             try:
-                cred = w.database.generate_database_credential(
-                    request_id=str(uuid.uuid4()),
-                    instance_names=[LAKEBASE_INSTANCE_NAME]
-                )
-                sp_token_cache["value"] = cred.token
-                print(f"Generated SP credential for instance: {LAKEBASE_INSTANCE_NAME}")
-            except Exception as e:
-                print(f"Warning: generate_database_credential failed ({e}), falling back to oauth_token")
-                try:
-                    sp_token_cache["value"] = w.config.oauth_token().access_token
-                except Exception as e2:
-                    print(f"Error getting oauth_token: {e2}")
-                    raise
-            sp_token_cache["ts"] = now
-        cparams["password"] = sp_token_cache["value"]
+                fallback_token_cache["value"] = w.config.oauth_token().access_token
+            except Exception:
+                pass
+            fallback_token_cache["ts"] = now
+        cparams["password"] = fallback_token_cache["value"]
     
     return engine
 
-# Get current user for ticket assignment
-# The PGUSER is the service principal, not the actual user
-# We need to get the actual user from request headers in Databricks Apps
-PGUSER_SERVICE_PRINCIPAL = PGUSER
-
 def get_current_user():
-    """Get the actual user identity from Databricks App request headers.
-    
-    Databricks Apps pass the user's email in the X-Forwarded-Email header.
-    Falls back to checking X-Forwarded-User or the service principal.
-    """
+    """Get the current user's email from request headers."""
     try:
-        # Try to get user from Databricks App headers
-        user_email = request.headers.get('X-Forwarded-Email')
-        if user_email:
-            return user_email
-        
-        # Fallback: try X-Forwarded-User
-        user = request.headers.get('X-Forwarded-User')
-        if user:
-            return user
-        
-        # Last resort: return service principal (won't match any tickets)
-        return PGUSER_SERVICE_PRINCIPAL
+        return request.headers.get('X-Forwarded-Email', 'Unknown')
     except RuntimeError:
-        # No request context (e.g., during initialization)
-        return PGUSER_SERVICE_PRINCIPAL
+        return 'Unknown'
 
-# For display purposes during initialization
-CURRENT_USER_DISPLAY = "Loading..."
-
-# Check if table exists (don't create - setup notebook handles that)
+# Check if table exists
 def check_table_exists(engine: Engine) -> bool:
     """Check if the support tickets table exists."""
     sql = """
@@ -146,101 +97,34 @@ def check_table_exists(engine: Engine) -> bool:
         result = conn.execute(text(sql), {"schema": LAKEBASE_SCHEMA, "table": LAKEBASE_TABLE}).scalar()
         return result
 
-def debug_database_state(engine: Engine):
-    """Debug database connection and table state."""
-    try:
-        with engine.begin() as conn:
-            # Check current database and user
-            result = conn.execute(text("SELECT current_database(), current_user, current_schema()")).fetchone()
-            print(f"=== Database Debug Info ===")
-            print(f"  Connected to database: {result[0]}")
-            print(f"  Connected as user: {result[1]}")
-            print(f"  Current schema: {result[2]}")
-            
-            # List all schemas
-            schemas = conn.execute(text("SELECT schema_name FROM information_schema.schemata")).fetchall()
-            print(f"  Available schemas: {[s[0] for s in schemas]}")
-            
-            # List all tables (no filter)
-            tables = conn.execute(text("""
-                SELECT table_schema, table_name 
-                FROM information_schema.tables 
-                WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-                ORDER BY table_schema, table_name
-            """)).fetchall()
-            
-            if tables:
-                print(f"  Tables found:")
-                for t in tables:
-                    print(f"    - {t[0]}.{t[1]}")
-            else:
-                print(f"  No user tables found!")
-            
-            # Try direct query on expected table
-            print(f"\n  Checking for table: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
-            try:
-                count = conn.execute(text(f"SELECT COUNT(*) FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")).scalar()
-                print(f"  Direct query SUCCESS! Row count: {count}")
-            except Exception as table_err:
-                print(f"  Direct query FAILED: {table_err}")
-            
-            print("=" * 40)
-    except Exception as e:
-        print(f"Debug error: {e}")
-
-TABLE_MISSING_WARNING = f"""
-⚠️ Table '{LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}' does not exist!
-
-Please run the setup notebook before using this app:
-  apps/support_tickets_dash/setup-lakebase.ipynb
-
-This notebook will create the Lakebase instance, table, and seed data.
-"""
-
 def get_tickets(engine: Engine, status_filter=None):
     """Fetch tickets from database.
     
-    RLS is configured to check the app.current_user_email session variable,
-    which we set at the start of each query using the user's email from headers.
+    RLS filters automatically based on current_user (the connected user's email).
     """
-    current_user_email = get_current_user()
+    sql = f"""
+    SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
+    FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
+    """
+    params = {}
+    
+    if status_filter and status_filter != "all":
+        sql += " WHERE status = :status"
+        params["status"] = status_filter
+    
+    sql += " ORDER BY created_at DESC"
     
     with engine.begin() as conn:
-        # Set session variable for RLS policy to use
-        conn.execute(text("SET app.current_user_email = :email"), {"email": current_user_email})
-        print(f"Set app.current_user_email = {current_user_email}")
-        
-        sql = f"""
-        SELECT id, title, description, customer_email, status, priority, assigned_to, created_at, updated_at
-        FROM {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
-        """
-        params = {}
-        
-        if status_filter and status_filter != "all":
-            sql += " WHERE status = :status"
-            params["status"] = status_filter
-        
-        sql += " ORDER BY created_at DESC"
-        
         result = conn.execute(text(sql), params).mappings().all()
-        print(f"Query returned {len(result)} rows")
         return pd.DataFrame(result) if result else pd.DataFrame()
 
 def create_ticket(engine: Engine, title, description, customer_email, priority):
-    """Create a new support ticket assigned to the current user.
-    
-    Uses the app.current_user_email session variable for the assigned_to field.
+    """Create a new support ticket assigned to the current user."""
+    sql = f"""
+    INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
+    VALUES (:title, :desc, :email, :priority, 'open', current_user)
     """
-    current_user_email = get_current_user()
-    
     with engine.begin() as conn:
-        # Set session variable for RLS policy
-        conn.execute(text("SET app.current_user_email = :email"), {"email": current_user_email})
-        
-        sql = f"""
-        INSERT INTO {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} (title, description, customer_email, priority, status, assigned_to)
-        VALUES (:title, :desc, :email, :priority, 'open', current_setting('app.current_user_email'))
-        """
         conn.execute(text(sql), {
             "title": title,
             "desc": description,
@@ -249,7 +133,7 @@ def create_ticket(engine: Engine, title, description, customer_email, priority):
         })
 
 def update_ticket_status(engine: Engine, ticket_id, new_status):
-    """Update ticket status"""
+    """Update ticket status."""
     sql = f"""
     UPDATE {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}
     SET status = :status, updated_at = now()
@@ -258,71 +142,43 @@ def update_ticket_status(engine: Engine, ticket_id, new_status):
     with engine.begin() as conn:
         conn.execute(text(sql), {"status": new_status, "id": ticket_id})
 
-# Initialize engine and check table exists
+# Initialize engine and check table
 engine = None
 table_exists = False
 init_error = None
 
 try:
     if missing:
-        raise ValueError(f"Cannot initialize database - missing env vars: {', '.join(missing)}")
+        raise ValueError(f"Missing env vars: {', '.join(missing)}")
     engine = get_engine()
-    print("Engine created successfully, checking table exists...")
     table_exists = check_table_exists(engine)
     if table_exists:
         print(f"Table verified: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
     else:
-        print(f"WARNING: Table {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE} does not exist according to information_schema!")
-        print("Running detailed debug...")
-        debug_database_state(engine)
+        print(f"Table not found: {LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}")
 except Exception as e:
-    import traceback
     init_error = str(e)
     print(f"Database initialization error: {e}")
-    print(f"Traceback:\n{traceback.format_exc()}")
 
 # Initialize Dash app
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 app.title = "Support Ticket System"
 
-# Define status colors
-status_colors = {
-    "open": "danger",
-    "in_progress": "warning",
-    "resolved": "success",
-    "closed": "secondary"
-}
+# Status/priority colors
+status_colors = {"open": "danger", "in_progress": "warning", "resolved": "success", "closed": "secondary"}
+priority_colors = {"low": "info", "medium": "warning", "high": "danger", "critical": "dark"}
 
-priority_colors = {
-    "low": "info",
-    "medium": "warning",
-    "high": "danger",
-    "critical": "dark"
-}
-
-# Build warning alert if needed
+# Warning alert helper
 def get_warning_alert():
     if init_error:
         return dbc.Alert([
-            html.H4("⚠️ Database Connection Error", className="alert-heading"),
+            html.H4("Database Connection Error", className="alert-heading"),
             html.P(f"Error: {init_error}"),
-            html.Hr(),
-            html.P([
-                "Please ensure the database resource is configured correctly and run ",
-                html.Code("apps/support_tickets_dash/setup-lakebase.ipynb"),
-                " to create the Lakebase instance and table."
-            ], className="mb-0")
         ], color="danger", className="mb-4")
     elif not table_exists:
         return dbc.Alert([
-            html.H4("⚠️ Table Not Found", className="alert-heading"),
-            html.P(f"The table '{LAKEBASE_SCHEMA}.{LAKEBASE_TABLE}' does not exist."),
-            html.Hr(),
-            html.P([
-                "Please run ",
-                html.Code("apps/support_tickets_dash/setup-lakebase.ipynb"),
-                " in Databricks to create the Lakebase instance, table, and seed data before using this app."
-            ], className="mb-0")
+            html.H4("Table Not Found", className="alert-heading"),
+            html.P(f"Please run setup-lakebase.ipynb to create the table."),
         ], color="warning", className="mb-4")
     return None
 
@@ -330,14 +186,13 @@ warning_alert = get_warning_alert()
 
 # Layout
 app.layout = dbc.Container([
-    # Warning banner (if any)
     warning_alert if warning_alert else html.Div(),
     
     dbc.Row([
         dbc.Col([
             html.H1("🎫 Support Ticket System", className="text-center mb-4 mt-4"),
             html.P([
-                f"Powered by Databricks Lakebase • Logged in as: ",
+                "Powered by Databricks Lakebase • Logged in as: ",
                 html.Strong(id="current-user-display")
             ], className="text-center text-muted mb-4")
         ])
@@ -377,7 +232,7 @@ app.layout = dbc.Container([
             ])
         ], width=4),
         
-        # Right column - View Tickets
+        # Right column - Tickets List
         dbc.Col([
             dbc.Card([
                 dbc.CardHeader([
@@ -387,63 +242,60 @@ app.layout = dbc.Container([
                             dbc.Select(
                                 id="status-filter",
                                 options=[
-                                    {"label": "All My Tickets", "value": "all"},
-                                    {"label": "🔴 Open", "value": "open"},
-                                    {"label": "🟡 In Progress", "value": "in_progress"},
-                                    {"label": "🟢 Resolved", "value": "resolved"},
-                                    {"label": "⚫ Closed", "value": "closed"}
+                                    {"label": "All", "value": "all"},
+                                    {"label": "Open", "value": "open"},
+                                    {"label": "In Progress", "value": "in_progress"},
+                                    {"label": "Resolved", "value": "resolved"},
+                                    {"label": "Closed", "value": "closed"}
                                 ],
-                                value="all"
+                                value="all",
+                                size="sm"
                             )
                         ], width=6)
                     ])
                 ]),
                 dbc.CardBody([
-                    dcc.Interval(id="refresh-interval", interval=5000, n_intervals=0),
-                    html.Div(id="tickets-container")
+                    html.Div(id="tickets-container", style={"maxHeight": "600px", "overflowY": "auto"})
                 ])
             ])
         ], width=8)
-    ], className="mb-4"),
+    ]),
     
-    # Update ticket modal
+    # Update Modal
     dbc.Modal([
         dbc.ModalHeader(dbc.ModalTitle("Update Ticket Status")),
         dbc.ModalBody([
             html.Div(id="modal-ticket-info"),
-            dbc.Label("New Status", className="mt-3"),
+            html.Hr(),
+            dbc.Label("New Status"),
             dbc.Select(
                 id="modal-new-status",
                 options=[
-                    {"label": "🔴 Open", "value": "open"},
-                    {"label": "🟡 In Progress", "value": "in_progress"},
-                    {"label": "🟢 Resolved", "value": "resolved"},
-                    {"label": "⚫ Closed", "value": "closed"}
+                    {"label": "Open", "value": "open"},
+                    {"label": "In Progress", "value": "in_progress"},
+                    {"label": "Resolved", "value": "resolved"},
+                    {"label": "Closed", "value": "closed"}
                 ]
             )
         ]),
         dbc.ModalFooter([
-            dbc.Button("Update", id="update-ticket-btn", color="primary"),
-            dbc.Button("Close", id="close-modal-btn", color="secondary")
+            dbc.Button("Cancel", id="close-modal-btn", className="me-2"),
+            dbc.Button("Update", id="update-ticket-btn", color="primary")
         ])
     ], id="update-modal", is_open=False),
     
-    # Hidden div to store selected ticket ID
-    html.Div(id="selected-ticket-id", style={"display": "none"})
+    html.Div(id="selected-ticket-id", style={"display": "none"}),
+    dcc.Interval(id="refresh-interval", interval=30000, n_intervals=0)
     
 ], fluid=True, className="py-3")
 
 # Callbacks
-
-# Display current user (updated on each refresh)
 @callback(
     Output("current-user-display", "children"),
     Input("refresh-interval", "n_intervals")
 )
 def update_user_display(n):
-    user = get_current_user()
-    print(f"Current user from headers: {user}")
-    return user
+    return get_current_user()
 
 @callback(
     Output("create-ticket-output", "children"),
@@ -460,16 +312,16 @@ def update_user_display(n):
 )
 def create_new_ticket(n_clicks, title, description, email, priority):
     if engine is None or not table_exists:
-        return dbc.Alert("Database not ready. Please run setup-lakebase.ipynb first.", color="danger"), title, description, email, priority
+        return dbc.Alert("Database not ready.", color="danger"), title, description, email, priority
     
     if not all([title, description, email]):
         return dbc.Alert("Please fill in all fields", color="warning"), title, description, email, priority
     
     try:
         create_ticket(engine, title, description, email, priority)
-        return dbc.Alert("✅ Ticket created successfully!", color="success"), "", "", "", "medium"
+        return dbc.Alert("✅ Ticket created!", color="success"), "", "", "", "medium"
     except Exception as e:
-        return dbc.Alert(f"❌ Error: {str(e)}", color="danger"), title, description, email, priority
+        return dbc.Alert(f"Error: {str(e)}", color="danger"), title, description, email, priority
 
 @callback(
     Output("tickets-container", "children"),
@@ -479,53 +331,41 @@ def create_new_ticket(n_clicks, title, description, email, priority):
     Input("update-ticket-btn", "n_clicks")
 )
 def update_tickets_display(n, status_filter, create_clicks, update_clicks):
-    # Check if database is ready
     if engine is None:
-        return dbc.Alert([
-            html.Strong("Database not connected. "),
-            "Please check the logs and ensure the database resource is configured."
-        ], color="danger")
+        return dbc.Alert("Database not connected.", color="danger")
     
     if not table_exists:
-        return dbc.Alert([
-            html.Strong("Table not found. "),
-            html.Span("Please run "),
-            html.Code("setup-lakebase.ipynb"),
-            html.Span(" to initialize the database.")
-        ], color="warning")
+        return dbc.Alert("Table not found. Run setup-lakebase.ipynb first.", color="warning")
     
     try:
         df = get_tickets(engine, status_filter)
         
         if df.empty:
-            return dbc.Alert("No tickets found. Create your first ticket using the form on the left!", color="info")
+            return dbc.Alert("No tickets found. Create your first ticket!", color="info")
         
-        # Create ticket cards
         tickets = []
         for _, row in df.iterrows():
             ticket_card = dbc.Card([
                 dbc.CardHeader([
                     dbc.Row([
+                        dbc.Col(html.Strong(f"#{row['id']} - {row['title']}"), width=7),
                         dbc.Col([
-                            html.Strong(f"#{row['id']} - {row['title']}")
-                        ], width=7),
-                        dbc.Col([
-                            dbc.Badge(row['status'].replace('_', ' ').title(), color=status_colors.get(row['status'], "secondary"), className="me-2"),
-                            dbc.Badge(row['priority'].title(), color=priority_colors.get(row['priority'], "info"))
+                            dbc.Badge(row['status'].replace('_', ' ').title(), 
+                                     color=status_colors.get(row['status'], "secondary"), className="me-2"),
+                            dbc.Badge(row['priority'].title(), 
+                                     color=priority_colors.get(row['priority'], "info"))
                         ], width=5, className="text-end")
                     ])
                 ]),
                 dbc.CardBody([
                     html.P(row['description'], className="mb-2"),
                     html.Small([
-                        html.I(className="bi bi-envelope me-1"),
-                        row['customer_email'],
-                        " • ",
-                        html.I(className="bi bi-clock me-1"),
+                        row['customer_email'], " • ",
                         row['created_at'].strftime('%Y-%m-%d %H:%M') if hasattr(row['created_at'], 'strftime') else str(row['created_at'])
                     ], className="text-muted"),
                     html.Div([
-                        dbc.Button("Update Status", id={"type": "update-btn", "index": row['id']}, size="sm", color="primary", className="mt-2")
+                        dbc.Button("Update Status", id={"type": "update-btn", "index": row['id']}, 
+                                  size="sm", color="primary", className="mt-2")
                     ])
                 ])
             ], className="mb-3")
@@ -533,7 +373,7 @@ def update_tickets_display(n, status_filter, create_clicks, update_clicks):
         
         return tickets
     except Exception as e:
-        return dbc.Alert(f"Error loading tickets: {str(e)}", color="danger")
+        return dbc.Alert(f"Error: {str(e)}", color="danger")
 
 @callback(
     Output("update-modal", "is_open"),
@@ -559,7 +399,6 @@ def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_
     
     trigger_id = callback_context.triggered[0]["prop_id"]
     
-    # If update button clicked
     if "update-btn" in trigger_id:
         try:
             ticket_id = eval(trigger_id.split(".")[0])["index"]
@@ -572,20 +411,16 @@ def toggle_modal(update_clicks, close_clicks, confirm_clicks, is_open, selected_
             ])
             
             return True, ticket_id, info, ticket['status']
-        except Exception as e:
-            print(f"Error opening modal: {e}")
+        except Exception:
             return False, None, "", None
     
-    # If confirm update clicked
     if "update-ticket-btn" in trigger_id and selected_id:
         try:
             update_ticket_status(engine, int(selected_id), new_status)
-            return False, None, "", None
-        except Exception as e:
-            print(f"Error updating ticket: {e}")
-            return False, None, "", None
+        except Exception:
+            pass
+        return False, None, "", None
     
-    # Close modal
     return False, None, "", None
 
 if __name__ == "__main__":
