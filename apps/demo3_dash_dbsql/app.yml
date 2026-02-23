@@ -1,0 +1,10 @@
+command: [
+  "python", "app.py"
+]
+env:
+  - name: SQL_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: DATABRICKS_CATALOG
+    value: <my_catalog>
+  - name: DATABRICKS_SCHEMA
+    value: <my_schema>

@@ -1,0 +1,28 @@
+bundle:
+  name: databricks-apps-workshop
+
+include:
+  - dab/resources/*.yml
+  - dab/resources/*/*.yml
+
+variables:
+  dbsql_serverless_warehouse_id: 
+    description: The Databricks SQL Serverless Warehouse ID to use for this bundle.
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://<your-databricks-instance>
+    variables:
+      dbsql_serverless_warehouse_id: "<your-dev-dbsql-serverless-warehouse-id>"
+
+  prod:
+    mode: production
+    default: false
+    workspace:
+      host: https://<your-databricks-instance>
+    variables:
+      dbsql_serverless_warehouse_id: "<your-prod-dbsql-serverless-warehouse-id>"
+  

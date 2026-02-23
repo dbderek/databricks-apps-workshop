@@ -1,0 +1,4 @@
+dash
+databricks-sdk==0.33.0
+databricks-sql-connector
+pandas==2.2.3

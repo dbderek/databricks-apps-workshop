@@ -1,0 +1,20 @@
+resources:
+  apps:
+    demo3-dash-dbsql:
+      name: "demo3-dash-dbsql"
+      source_code_path: ../../apps/demo3_dash_dbsql
+      description: "A Dash app for exploring Databricks SQL"
+      user_api_scopes:
+        - sql
+        - catalog.tables:read
+        - catalog.schemas:read
+        - catalog.catalogs:read
+
+
+      # The resources which this app should have access to
+      resources:
+        - name: "sql-warehouse"
+          sql_warehouse: # resource key
+            id: ${var.dbsql_serverless_warehouse_id}
+            permission: "CAN_USE"
+
